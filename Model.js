@@ -314,9 +314,14 @@ function recentKeys(usage, now, limit, exclude) {
     if (!entry || !(entry.count >= 1)) continue
     keys.push(key)
   }
+  // Equal rank is reachable: 2 launches an hour ago and 40 from three months
+  // ago both come to 4. The fresher one is the better guess, and the key
+  // breaks the last tie so the list never reshuffles on its own.
   keys.sort(function(a, b) {
     var diff = rank(source[b], now) - rank(source[a], now)
     if (diff !== 0) return diff
+    var age = (source[b].last || 0) - (source[a].last || 0)
+    if (age !== 0) return age
     return a < b ? -1 : (a > b ? 1 : 0)
   })
   return keys.slice(0, limit)

@@ -63,12 +63,16 @@ test("frecency never outranks an exact prefix match", () => {
   assert.ok(10000 - 12 > learned)
 })
 
-test("recentKeys prefers two launches this hour over forty from months ago", () => {
+test("recentKeys prefers two launches this morning over forty from months ago", () => {
   const usage = {
-    "app:today": { count: 2, last: NOW - 30 * 60000 },
+    "app:today": { count: 2, last: NOW - 4 * HOUR },
     "app:stale": { count: 40, last: NOW - 100 * DAY }
   }
+  // Both rank 4 exactly (2 x 2 vs 40 x 0.1); recency breaks the tie.
   assert.deepEqual(Model.recentKeys(usage, NOW, 8, {}), ["app:today", "app:stale"])
+
+  const fresher = { "app:a": { count: 1, last: NOW - HOUR }, "app:b": { count: 1, last: NOW - 3 * HOUR } }
+  assert.deepEqual(Model.recentKeys(fresher, NOW, 8, {}), ["app:a", "app:b"])
 })
 
 test("normalizeState drops malformed keys, values and pins", () => {

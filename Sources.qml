@@ -211,6 +211,15 @@ Item {
     root.filePaths = []
   }
 
+  // Closing the palette ends the search with it: a run that lands afterwards
+  // would publish rows nobody asked for and keep a process alive for nothing.
+  function cancelFiles() {
+    fdKill.stop()
+    root.pendingFiles = null
+    root.fileGeneration += 1
+    if (fdProc.running) fdProc.running = false
+  }
+
   // ---- Template expansion
   //
   // {clipboard} and {selection} are the only tokens that need a subprocess, so

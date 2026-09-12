@@ -80,6 +80,9 @@ Item {
     root.scopeStack = []
     root.confirmKey = ""
     root.pinnedKey = ""
+    // Clear before pushing: pushScope remembers the field's current text as
+    // what Esc should restore, and last session's query is not that.
+    input.text = ""
 
     var requested = String((payload && payload.scope) || "")
     if (Model.SCOPES.indexOf(requested) >= 0) pushScope(requested)
@@ -98,6 +101,7 @@ Item {
     root.confirmKey = ""
     root.ctrlHeld = false
     fdDebounce.stop()
+    sources.cancelFiles()
     ctrlTimer.stop()
   }
 
@@ -354,9 +358,14 @@ Item {
       pushScope(payload.scope)
       return
     }
+    // The cheat sheet types a token into the field, so it has to leave its own
+    // scope first: a pushed scope wins over every prefix, and `cb ` typed
+    // inside Keywords would just filter the cheat sheet.
     if (payload.kind === "help") {
+      if (root.scope === "help") popScope()
       input.text = payload.insert
       input.cursorPosition = input.text.length
+      rebuild()
       return
     }
     if ((payload.kind === "quicklink" || payload.kind === "snippet" || payload.kind === "command") && payload.complete) {
@@ -949,7 +958,7 @@ Item {
     } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
       activate(root.selectedIndex, control || shift)
       event.accepted = true
-    } else if (event.key === Qt.Key_Tab) {
+    } else if (event.key === Qt.Key_Tab && !shift) {
       completeSelection()
       event.accepted = true
     } else if (event.key === Qt.Key_Escape) {
