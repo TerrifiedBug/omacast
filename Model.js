@@ -98,6 +98,7 @@ function row(spec) {
     keyword: String(value.keyword || ""),
     frecencyKey: String(value.frecencyKey || ""),
     pinnable: value.pinnable === true,
+    promoted: value.promoted === true,
     confirm: value.confirm === true,
     primaryLabel: clip(value.primaryLabel || "Run", 40),
     secondaryLabel: clip(value.secondaryLabel || "", 40),
@@ -110,9 +111,14 @@ function row(spec) {
 // Section order first, then score, then the order the provider emitted. Array
 // sort is stable in every engine this runs on, so equal rows keep their input
 // order anyway; `order` makes that explicit for providers that care.
+//
+// One thing outranks the section order: a row whose keyword the user actually
+// typed. `td` is an instruction, and burying it under every app whose acronym
+// happens to be td makes the keyword useless.
 function sortRows(rows) {
   var out = (rows || []).slice()
   out.sort(function(a, b) {
+    if (a.promoted !== b.promoted) return a.promoted ? -1 : 1
     var sa = sectionIndex(a.section)
     var sb = sectionIndex(b.section)
     if (sa !== sb) return sa - sb
@@ -723,6 +729,7 @@ function quicklinkRows(quicklinks, query, usage, now) {
     out.push(row({
       key: key,
       section: "quicklinks",
+      promoted: admission.direct,
       title: admission.direct && admission.argument ? link.name + ": " + admission.argument : link.name,
       subtitle: link.keyword ? link.keyword + (wants ? " <query>" : "") : link.url,
       icon: ICON_QUICKLINK,
@@ -752,6 +759,7 @@ function snippetRows(snippets, query, usage, now) {
     out.push(row({
       key: key,
       section: "snippets",
+      promoted: admission.direct,
       title: snippet.name,
       subtitle: clip(firstLine(snippet.text), 80),
       icon: ICON_SNIPPET,
@@ -782,6 +790,7 @@ function commandRows(commands, query, usage, now) {
     out.push(row({
       key: key,
       section: "commands",
+      promoted: admission.direct,
       title: command.name,
       subtitle: clip(command.command, 80) + (command.terminal ? " · terminal" : ""),
       icon: ICON_COMMAND,

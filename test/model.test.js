@@ -400,6 +400,20 @@ test("the config row is findable by what people call it", () => {
   assert.deepEqual(Model.configRows("firefox", path), [])
 })
 
+test("a typed keyword sorts above rows from earlier sections", () => {
+  const config = Model.normalizeConfig({ snippets: [{ name: "Today", keyword: "td", text: "{date}" }] })
+  const app = Model.row({ section: "apps", title: "Telegram Desktop", score: 4000 })
+  const snippet = Model.snippetRows(config.snippets, "td", {}, NOW)[0]
+
+  assert.equal(snippet.promoted, true)
+  assert.equal(Model.sortRows([app, snippet])[0].title, "Today")
+
+  // A fuzzy name match is not an instruction, so it stays in section order.
+  const browsed = Model.snippetRows(config.snippets, "toda", {}, NOW)[0]
+  assert.equal(browsed.promoted, false)
+  assert.equal(Model.sortRows([app, browsed])[0].title, "Telegram Desktop")
+})
+
 test("quicklink rows admit a typed keyword above every fuzzy tier", () => {
   const rows = Model.quicklinkRows(Model.DEFAULT_QUICKLINKS, "gh quickshell", {}, NOW)
   assert.equal(rows[0].title, "GitHub: quickshell")
