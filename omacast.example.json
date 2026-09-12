@@ -1,0 +1,28 @@
+{
+  // OmaCast config. The palette's "OmaCast Config" row copies this file to
+  // ~/.config/omarchy/omacast.json and opens it. As shipped it changes nothing:
+  // fill in the empty lists to add your own entries. Comments and trailing
+  // commas are fine, and edits apply as soon as you save.
+
+  // Keyword of the quicklink used for the web fallback row.
+  // Built-ins: g (Google), ddg, yt, gh, aw (Arch Wiki), aur, w (Wikipedia).
+  "searchEngine": "g",
+
+  // Name a built-in here to drop it, e.g. ["ddg", "aur"].
+  // Set "builtinQuicklinks": false to drop all of them.
+  "hiddenQuicklinks": [],
+
+  // A keyword matching a built-in replaces it.
+  // { "name": "Work GitHub", "keyword": "gh", "url": "https://github.com/my-org/{argument}" }
+  "quicklinks": [],
+
+  // Typed into the window you came from. {argument}, {clipboard}, {selection},
+  // {date}, {time}, {datetime}, {day} and {uuid} all work.
+  // { "name": "Today", "keyword": "td", "text": "{date format=\"yyyy-MM-dd\"}" }
+  "snippets": [],
+
+  // Words after the keyword arrive as "$@", never spliced into the string.
+  // "terminal": true runs it in a floating terminal, "confirm": true asks first.
+  // { "name": "Prune docker", "keyword": "prune", "command": "docker system prune -f", "confirm": true }
+  "commands": []
+}

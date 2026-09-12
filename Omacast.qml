@@ -45,6 +45,10 @@ Item {
 
   readonly property string manifestId: manifest && manifest.id ? manifest.id : "io.github.terrifiedbug.omacast"
   readonly property string scope: scopeStack.length > 0 ? scopeStack[scopeStack.length - 1].scope : "root"
+  readonly property string configPath: root.home + "/.config/omarchy/omacast.json"
+  // Where this plugin was installed, so the Config row can seed the file from
+  // the example shipped beside it.
+  readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")
 
   readonly property color background: Color.menu.background
   readonly property color foreground: Color.menu.text
@@ -141,6 +145,8 @@ Item {
       selectedIndex: root.selectedIndex,
       confirmKey: root.confirmKey,
       pins: sources.store.pins,
+      configPath: root.configPath,
+      pluginDir: root.pluginDir,
       rows: out
     })
   }
@@ -239,6 +245,7 @@ Item {
     rows = rows.concat(Model.snippetRows(sources.config.snippets, query, usage, now))
     rows = rows.concat(Model.commandRows(sources.config.commands, query, usage, now))
     rows = rows.concat(Model.scopeRows(query))
+    rows = rows.concat(Model.configRows(query, root.configPath))
     rows = rows.concat(Model.webRows(query, sources.config.searchQuicklink))
     return rows
   }
@@ -489,6 +496,16 @@ Item {
       dismiss()
       if (!link) return
       sources.resolveTemplate(link.url, query, "url", function(url) { openDestination(url) })
+      return
+    }
+
+    // First open creates the file from the shipped example. Paths ride in as
+    // positional parameters so nothing in them is re-parsed by the shell.
+    if (payload.kind === "config") {
+      var script = 'mkdir -p "$(dirname "$1")"; [ -f "$1" ] || cp "$2" "$1"; exec omarchy-launch-config-editor "$1"'
+      var args = ["bash", "-lc", script, "bash", root.configPath, root.pluginDir + "omacast.example.json"]
+      dismiss()
+      Qt.callLater(function() { Quickshell.execDetached(args) })
       return
     }
   }

@@ -388,6 +388,18 @@ test("the config accepts comments and trailing commas without touching strings",
   assert.equal(Model.parseConfig(""), null)
 })
 
+test("the config row is findable by what people call it", () => {
+  const path = "/home/x/.config/omarchy/omacast.json"
+  for (const query of ["config", "omacast config", "settings", "quicklinks", "snippets"]) {
+    const rows = Model.configRows(query, path)
+    assert.equal(rows.length, 1, query)
+    assert.equal(rows[0].payload.kind, "config")
+    assert.equal(rows[0].subtitle, path)
+    assert.equal(rows[0].primaryLabel, "Edit")
+  }
+  assert.deepEqual(Model.configRows("firefox", path), [])
+})
+
 test("quicklink rows admit a typed keyword above every fuzzy tier", () => {
   const rows = Model.quicklinkRows(Model.DEFAULT_QUICKLINKS, "gh quickshell", {}, NOW)
   assert.equal(rows[0].title, "GitHub: quickshell")

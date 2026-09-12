@@ -67,6 +67,7 @@ var ICON_FILE = ""            // nf-fa-file
 var ICON_SEARCH = ""          // nf-fa-search
 var ICON_CALC = ""            // nf-fa-calculator
 var ICON_LINK = ""            // nf-fa-globe
+var ICON_SETTINGS = ""        // nf-fa-cog
 
 function sectionIndex(section) {
   var at = SECTIONS.indexOf(String(section || ""))
@@ -1039,6 +1040,29 @@ function answerRows(query) {
   return out
 }
 
+// The config file does not exist until someone wants it, so the palette
+// carries the way in: this row opens it in the editor, creating it from the
+// shipped example on first use.
+function configRows(query, path) {
+  var score = matchScore(query, {
+    name: "OmaCast Config",
+    aliases: ["settings", "preferences", "quicklinks", "snippets", "commands", "omacast"],
+    text: String(path || "")
+  })
+  if (score < 0) return []
+
+  return [row({
+    key: "cfg:config",
+    section: "actions",
+    title: "OmaCast Config",
+    subtitle: String(path || ""),
+    icon: ICON_SETTINGS,
+    primaryLabel: "Edit",
+    score: score,
+    payload: { kind: "config" }
+  })]
+}
+
 function webRows(query, engine) {
   var q = String(query || "").trim()
   if (q.length < 2) return []
@@ -1934,6 +1958,7 @@ function parseEmojis(raw) {
 if (typeof module !== "undefined") {
   module.exports = {
     buildMenuIndex: buildMenuIndex,
+    configRows: configRows,
     prepareFields: prepareFields,
     parseConfig: parseConfig,
     SECTIONS: SECTIONS,
