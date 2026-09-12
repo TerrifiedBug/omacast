@@ -201,6 +201,7 @@ Item {
     var now = Date.now()
     var usage = sources.store.usage
     var rows = []
+    var caps = ({})
 
     if (parsed.scope === "clipboard") {
       rows = Model.clipboardRows(sources.clipboardEntries, parsed.rest)
@@ -210,18 +211,21 @@ Item {
       var request = Model.fileRequest(parsed, root.home)
       rows = Model.fileRows(sources.filePaths, request.terms.length > 0 ? request.terms[0] : "", root.home)
     } else if (parsed.scope === "windows") {
+      // The scope exists to show the ones the root view had to leave out.
       rows = Model.windowRows(sources.toplevels, parsed.rest)
+      caps = { windows: Infinity }
     } else if (parsed.scope === "help") {
       rows = Model.helpRows(sources.config, parsed.rest)
     } else if (parsed.scope.indexOf("menu:") === 0) {
       rows = Model.menuRows(sources.menuItems, sources.menuOrder, sources.whenResults, sources.checkedResults, parsed.rest, usage, now, parsed.scope, MenuModel)
     } else if (!parsed.trimmed) {
       rows = Model.emptyQueryRows({ byKey: catalogByKey(), windowRows: Model.windowRows(sources.toplevels, "") }, sources.store, now)
+      caps = { windows: Model.EMPTY_WINDOW_LIMIT }
     } else {
       rows = rootRows(parsed, usage, now)
     }
 
-    publish(Model.applyCaps(Model.sortRows(rows)))
+    publish(Model.applyCaps(Model.sortRows(rows), caps))
   }
 
   function rootRows(parsed, usage, now) {

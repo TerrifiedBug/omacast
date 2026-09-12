@@ -124,6 +124,19 @@ test("emptyQueryRows resolves pins and recents, and skips dead keys", () => {
   assert.equal(rows[1].title, "Kitty")
 })
 
+test("window caps differ per view: five beside search results, eight on the empty palette, all in the scope", () => {
+  const windows = []
+  for (let i = 0; i < 12; i++) windows.push({ index: i, title: "win" + i, appId: "app" + i, activated: false })
+
+  const rows = Model.windowRows(windows, "")
+  assert.equal(Model.applyCaps(Model.sortRows(rows)).length, Model.SECTION_CAPS.windows)
+  assert.equal(Model.applyCaps(Model.sortRows(rows), { windows: Model.EMPTY_WINDOW_LIMIT }).length, 8)
+  assert.equal(Model.applyCaps(Model.sortRows(rows), { windows: Infinity }).length, 12)
+
+  const empty = Model.emptyQueryRows({ byKey: {}, windowRows: rows }, { usage: {}, pins: [] }, NOW)
+  assert.equal(Model.applyCaps(Model.sortRows(empty), { windows: Model.EMPTY_WINDOW_LIMIT }).length, 8)
+})
+
 test("evaluate answers arithmetic, percentages, suffixes and radixes", () => {
   assert.equal(Model.evaluate("12*7+3").display, "87")
   assert.equal(Model.evaluate("sqrt(144)").display, "12")
@@ -244,7 +257,6 @@ test("parseQuery maps prefixes to scopes and lets a pushed scope win", () => {
   assert.equal(Model.parseQuery("cb ssh", "root").rest, "ssh")
   assert.equal(Model.parseQuery("f omacast", "root").scope, "files")
   assert.equal(Model.parseQuery("firefox", "root").scope, "root")
-
   const path = Model.parseQuery("~/Down", "root")
   assert.equal(path.scope, "files")
   assert.deepEqual(Model.fileRequest(path, "/home/x"), { dir: "/home/x", terms: ["Down"] })
@@ -253,6 +265,17 @@ test("parseQuery maps prefixes to scopes and lets a pushed scope win", () => {
   assert.equal(pushed.scope, "clipboard")
   assert.equal(pushed.rest, "f omacast")
 })
+
+test("every scope has a typed prefix, and win does not steal the w quicklink", () => {
+  assert.equal(Model.parseQuery("win chrome", "root").scope, "windows")
+  assert.equal(Model.parseQuery("win chrome", "root").rest, "chrome")
+  assert.equal(Model.parseQuery("windows ", "root").scope, "windows")
+  assert.equal(Model.parseQuery("w quickshell", "root").scope, "root")
+
+  const tokens = Model.helpRows(Model.normalizeConfig(null), "").map((r) => r.title)
+  for (const token of ["?", ":", "cb", "f", "win", "~/"]) assert.ok(tokens.includes(token), token)
+})
+
 
 test("a bare prefix with a trailing space still enters its scope", () => {
   assert.equal(Model.parseQuery("cb ", "root").scope, "clipboard")

@@ -121,12 +121,24 @@ function sortRows(rows) {
   return out
 }
 
-function applyCaps(rows) {
+// Caps are per view, not global: five windows are enough beside eight app
+// results, the empty palette shows more of them because there is nothing else
+// on screen, and the Windows scope shows every one. `overrides` replaces a
+// section's cap; a non-finite cap means no limit.
+function applyCaps(rows, overrides) {
+  var limits = overrides || ({})
   var seen = ({})
   var out = []
+
   for (var i = 0; i < rows.length; i++) {
     var section = rows[i].section
-    var cap = SECTION_CAPS[section] === undefined ? 25 : SECTION_CAPS[section]
+    var cap = limits[section] !== undefined
+      ? limits[section]
+      : (SECTION_CAPS[section] === undefined ? 25 : SECTION_CAPS[section])
+    if (!isFinite(cap)) {
+      out.push(rows[i])
+      continue
+    }
     var count = seen[section] || 0
     if (count >= cap) continue
     seen[section] = count + 1
@@ -257,6 +269,9 @@ function matchScore(query, fields) {
 var FRECENCY_MAX = 400
 var FRECENCY_HALF = 6
 var USAGE_LIMIT = 400
+// The empty palette has room the root search does not: nothing competes with
+// the window list there.
+var EMPTY_WINDOW_LIMIT = 8
 var USAGE_KEY = /^(app|menu|bind|ql|snip|cmd):[^\x00-\x1f]{1,240}$/
 
 function decay(ageMs) {
@@ -404,7 +419,7 @@ function emptyQueryRows(catalog, state, now) {
     if (byKey[recents[r]]) out.push(cloneInto(byKey[recents[r]], "recent", r))
   }
 
-  for (var w = 0; w < windows.length && w < 8; w++) out.push(cloneInto(windows[w], "windows", w))
+  for (var w = 0; w < windows.length && w < EMPTY_WINDOW_LIMIT; w++) out.push(cloneInto(windows[w], "windows", w))
 
   return out
 }
@@ -439,6 +454,11 @@ function parseQuery(text, scope) {
 
   var files = lead.match(/^(f|file|files)\s([\s\S]*)$/)
   if (files) return { raw: raw, trimmed: trimmed, scope: "files", prefix: files[1], rest: files[2].trim() }
+
+  // `w` belongs to the Wikipedia quicklink, so windows takes the spelled-out
+  // prefix. Every scope has one; the cheat sheet lists them.
+  var wins = lead.match(/^(win|window|windows)\s([\s\S]*)$/)
+  if (wins) return { raw: raw, trimmed: trimmed, scope: "windows", prefix: wins[1], rest: wins[2].trim() }
 
   if (/^(~|\/|\.\.?\/)/.test(trimmed)) return { raw: raw, trimmed: trimmed, scope: "files", prefix: "path", rest: trimmed }
 
@@ -1018,6 +1038,7 @@ var HELP_PREFIXES = [
   { token: ":", detail: "Emoji search, as in  :smile", icon: ICON_EMOJI },
   { token: "cb ", detail: "Clipboard history, as in  cb ssh", icon: ICON_CLIPBOARD },
   { token: "f ", detail: "Find files in your home, as in  f invoice", icon: ICON_FILE },
+  { token: "win ", detail: "Open windows, as in  win chrome", icon: ICON_WINDOW },
   { token: "~/", detail: "Browse a path, as in  ~/coding/", icon: ICON_FILE }
 ]
 
@@ -1821,6 +1842,7 @@ if (typeof module !== "undefined") {
     answerRows: answerRows,
     webRows: webRows,
     scopeRows: scopeRows,
+    EMPTY_WINDOW_LIMIT: EMPTY_WINDOW_LIMIT,
     helpRows: helpRows,
     scopeTitle: scopeTitle,
     scopePlaceholder: scopePlaceholder,

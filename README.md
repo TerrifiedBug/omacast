@@ -52,6 +52,7 @@ hl.layer_rule({ match = { namespace = "omarchy-omacast" }, no_anim = true, anima
 | `cb ssh` | Clipboard history, pasted or copied |
 | `:smile` | Emoji, typed into the focused window |
 | `f invoice`, `~/coding/` | File search through `fd`, opened with `gio` |
+| `win chrome` | Open windows, all of them, not just the top few |
 | `github.com/omacom` | The link, opened |
 | anything else | A web search with your engine |
 | `?` | The cheat sheet: every prefix and keyword you have configured |
