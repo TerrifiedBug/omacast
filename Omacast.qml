@@ -207,6 +207,8 @@ Item {
       rows = Model.fileRows(sources.filePaths, request.terms.length > 0 ? request.terms[0] : "", root.home)
     } else if (parsed.scope === "windows") {
       rows = Model.windowRows(sources.toplevels, parsed.rest)
+    } else if (parsed.scope === "help") {
+      rows = Model.helpRows(sources.config, parsed.rest)
     } else if (parsed.scope.indexOf("menu:") === 0) {
       rows = Model.menuRows(sources.menuItems, sources.menuOrder, sources.whenResults, sources.checkedResults, parsed.rest, usage, now, parsed.scope, MenuModel)
     } else if (!parsed.trimmed) {
@@ -350,6 +352,11 @@ Item {
     var payload = item.payload
     if (payload.kind === "scope") {
       pushScope(payload.scope)
+      return
+    }
+    if (payload.kind === "help") {
+      input.text = payload.insert
+      input.cursorPosition = input.text.length
       return
     }
     if ((payload.kind === "quicklink" || payload.kind === "snippet" || payload.kind === "command") && payload.complete) {
@@ -813,9 +820,11 @@ Item {
                 id: rowSubtitle
                 textFormat: Text.PlainText
                 anchors.right: rowAccessory.left
-                anchors.rightMargin: Style.spacing.sm
+                anchors.rightMargin: Style.spacing.md
                 anchors.verticalCenter: parent.verticalCenter
-                width: Math.min(implicitWidth, rowItem.width * 0.4)
+                // Half the row at most: the title is what the user is reading,
+                // the subtitle only says where the row came from.
+                width: Math.min(implicitWidth, rowItem.width * 0.5)
                 horizontalAlignment: Text.AlignRight
                 text: rowItem.subtitle
                 font.family: root.fontFamily

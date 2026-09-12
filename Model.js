@@ -11,7 +11,7 @@
 
 // ---- Sections
 
-var SECTIONS = ["answer", "pinned", "recent", "apps", "windows", "actions", "keybindings", "quicklinks", "snippets", "commands", "clipboard", "emoji", "files", "web"]
+var SECTIONS = ["answer", "pinned", "recent", "apps", "windows", "actions", "keybindings", "quicklinks", "snippets", "commands", "clipboard", "emoji", "files", "help", "web"]
 
 var SECTION_TITLES = {
   answer: "Answer",
@@ -27,6 +27,7 @@ var SECTION_TITLES = {
   clipboard: "Clipboard",
   emoji: "Emoji",
   files: "Files",
+  help: "Keywords",
   web: "Web"
 }
 
@@ -44,6 +45,7 @@ var SECTION_CAPS = {
   clipboard: 40,
   emoji: 60,
   files: 20,
+  help: 60,
   web: 1
 }
 
@@ -407,7 +409,7 @@ function emptyQueryRows(catalog, state, now) {
 // A pushed scope always wins: once the user is inside Clipboard, typing `f `
 // searches clipboard text for "f", it does not jump to files.
 
-var SCOPES = ["clipboard", "emoji", "files", "windows"]
+var SCOPES = ["clipboard", "emoji", "files", "windows", "help"]
 
 function parseQuery(text, scope) {
   var raw = String(text === undefined || text === null ? "" : text)
@@ -420,6 +422,10 @@ function parseQuery(text, scope) {
   // how a user enters the clipboard scope, and trimming first would leave a
   // bare "cb" that matches nothing.
   var lead = raw.replace(/^\s+/, "")
+
+  // `?` is the cheat sheet: every prefix and every configured keyword, with
+  // what it does. Nothing else in the palette starts with it.
+  if (lead.charAt(0) === "?") return { raw: raw, trimmed: trimmed, scope: "help", prefix: "?", rest: lead.slice(1).trim() }
 
   if (lead.charAt(0) === ":") return { raw: raw, trimmed: trimmed, scope: "emoji", prefix: ":", rest: lead.slice(1).trim() }
 
@@ -992,8 +998,66 @@ var SCOPE_ROWS = [
   { scope: "clipboard", name: "Clipboard History", icon: ICON_CLIPBOARD },
   { scope: "emoji", name: "Emoji", icon: ICON_EMOJI },
   { scope: "files", name: "Search Files", icon: ICON_SEARCH },
-  { scope: "windows", name: "Windows", icon: ICON_WINDOW }
+  { scope: "windows", name: "Windows", icon: ICON_WINDOW },
+  { scope: "help", name: "Keywords & Prefixes", icon: ICON_SEARCH }
 ]
+
+// ---- Cheat sheet
+//
+// Everything that can be typed as a prefix or a keyword, in one scope, so the
+// answer to "what was the clipboard prefix again?" is `?` rather than the
+// README. Activating a row types the token into the field.
+
+var HELP_PREFIXES = [
+  { token: "?", detail: "This list", icon: ICON_SEARCH },
+  { token: ":", detail: "Emoji search, as in  :smile", icon: ICON_EMOJI },
+  { token: "cb ", detail: "Clipboard history, as in  cb ssh", icon: ICON_CLIPBOARD },
+  { token: "f ", detail: "Find files in your home, as in  f invoice", icon: ICON_FILE },
+  { token: "~/", detail: "Browse a path, as in  ~/coding/", icon: ICON_FILE }
+]
+
+function helpRows(config, query) {
+  var settings = config || ({})
+  var out = []
+  var specs = []
+
+  for (var p = 0; p < HELP_PREFIXES.length; p++) {
+    specs.push({ token: HELP_PREFIXES[p].token, name: HELP_PREFIXES[p].detail, detail: "Prefix", icon: HELP_PREFIXES[p].icon })
+  }
+
+  var groups = [
+    { values: settings.quicklinks || [], detail: "Quicklink", icon: ICON_QUICKLINK },
+    { values: settings.snippets || [], detail: "Snippet", icon: ICON_SNIPPET },
+    { values: settings.commands || [], detail: "Command", icon: ICON_COMMAND }
+  ]
+
+  for (var g = 0; g < groups.length; g++) {
+    for (var i = 0; i < groups[g].values.length; i++) {
+      var entry = groups[g].values[i]
+      if (!entry.keyword) continue
+      specs.push({ token: entry.keyword + " ", name: entry.name, detail: groups[g].detail, icon: groups[g].icon })
+    }
+  }
+
+  for (var s = 0; s < specs.length; s++) {
+    var spec = specs[s]
+    var score = matchScore(query, { name: spec.token.trim(), aliases: [spec.name], text: spec.detail })
+    if (score < 0) continue
+    out.push(row({
+      key: "help:" + spec.token,
+      section: "help",
+      title: spec.token.trim(),
+      subtitle: spec.name,
+      icon: spec.icon,
+      accessory: spec.detail,
+      primaryLabel: "Type it",
+      score: score,
+      order: s,
+      payload: { kind: "help", insert: spec.token }
+    }))
+  }
+  return out
+}
 
 function scopeRows(query) {
   var q = String(query || "").trim()
@@ -1031,8 +1095,9 @@ function scopePlaceholder(scope) {
   if (scope === "emoji") return "Search emoji…"
   if (scope === "files") return "Search files in your home…"
   if (scope === "windows") return "Search open windows…"
+  if (scope === "help") return "Search prefixes and keywords…"
   if (String(scope || "").indexOf("menu:") === 0) return "Search this menu…"
-  return "Search apps, windows, actions…"
+  return "Search apps, windows, actions…  ? for keywords"
 }
 
 // ---- Calculator
@@ -1751,6 +1816,7 @@ if (typeof module !== "undefined") {
     answerRows: answerRows,
     webRows: webRows,
     scopeRows: scopeRows,
+    helpRows: helpRows,
     scopeTitle: scopeTitle,
     scopePlaceholder: scopePlaceholder,
     looksLikeExpression: looksLikeExpression,

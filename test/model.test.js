@@ -289,6 +289,31 @@ test("a directory printed by fd with a trailing slash keeps its name", () => {
   assert.equal(rows[0].payload.path, "/home/x/coding")
 })
 
+test("? opens the cheat sheet, which lists prefixes and configured keywords", () => {
+  const parsed = Model.parseQuery("?cb", "root")
+  assert.equal(parsed.scope, "help")
+  assert.equal(parsed.rest, "cb")
+
+  const config = Model.normalizeConfig({
+    snippets: [{ name: "Signature", keyword: "sig", text: "Cheers" }],
+    commands: [{ name: "Deploy", command: "deploy.sh" }]
+  })
+  const rows = Model.helpRows(config, "")
+  const tokens = rows.map((r) => r.title)
+
+  assert.ok(tokens.includes("cb"))
+  assert.ok(tokens.includes(":"))
+  assert.ok(tokens.includes("~/"))
+  assert.ok(tokens.includes("gh"))
+  assert.ok(tokens.includes("sig"))
+  // A command without a keyword has nothing to type, so it stays out.
+  assert.ok(!tokens.includes("Deploy"))
+
+  const clipboard = Model.helpRows(config, "cb")[0]
+  assert.equal(clipboard.payload.insert, "cb ")
+  assert.equal(clipboard.accessory, "Prefix")
+})
+
 test("quicklink rows admit a typed keyword above every fuzzy tier", () => {
   const rows = Model.quicklinkRows(Model.DEFAULT_QUICKLINKS, "gh quickshell", {}, NOW)
   assert.equal(rows[0].title, "GitHub: quickshell")
