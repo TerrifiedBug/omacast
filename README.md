@@ -86,7 +86,10 @@ armed.
 
 ## Configuration
 
-Optional, and OmaCast never writes it: `~/.config/omarchy/omacast.json`.
+Optional, and OmaCast never writes it: `~/.config/omarchy/omacast.json`. The
+file is missing by default; create it when you want your own entries. Comments
+and trailing commas are fine, the same way Omarchy's own menu JSONC allows
+them.
 
 ```json
 {

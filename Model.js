@@ -180,11 +180,12 @@ function acronymOf(name) {
   return out
 }
 
-// Number of skipped characters when `term` walks through `name` as a
+// Number of skipped characters when `term` walks through `words` as a
 // subsequence that starts on a word boundary, or -1 when it does not.
-function subsequenceGaps(name, term) {
+// `words` is wordText() output, which callers on a hot path precompute.
+function subsequenceGaps(words, term) {
   if (!term) return -1
-  var haystack = wordText(name)
+  var haystack = words
   var starts = ({})
   var atWordStart = true
   for (var s = 0; s < haystack.length; s++) {
@@ -218,26 +219,44 @@ function fieldAliases(fields) {
   return out
 }
 
-function termMatches(term, name, aliases, text, acronym) {
+// Lowercasing, the acronym and the word split are the same on every keystroke
+// for a row that has not changed. A provider whose source only changes on a
+// file or guard event prepares them once; everyone else passes plain strings
+// and matchScore does it inline.
+function prepareFields(name, aliases, text) {
+  var lowered = lower(name)
+  return {
+    name: lowered,
+    aliases: fieldAliases({ aliases: aliases }),
+    text: lower(text),
+    acronym: acronymOf(lowered),
+    words: wordText(lowered),
+    prepared: true
+  }
+}
+
+function termMatches(term, name, aliases, text, acronym, words) {
   if (name.indexOf(term) >= 0) return true
   for (var i = 0; i < aliases.length; i++) if (aliases[i].indexOf(term) >= 0) return true
   if (text.indexOf(term) >= 0) return true
   if (term.length <= 5 && acronym.indexOf(term) >= 0) return true
-  return subsequenceGaps(name, term) >= 0
+  return subsequenceGaps(words, term) >= 0
 }
 
 function matchScore(query, fields) {
   var q = lower(query).trim()
   if (!q) return 0
 
-  var name = lower(fields && fields.name)
-  var aliases = fieldAliases(fields)
-  var text = lower(fields && fields.text)
-  var acronym = acronymOf(name)
+  var ready = fields && fields.prepared === true
+  var name = ready ? fields.name : lower(fields && fields.name)
+  var aliases = ready ? fields.aliases : fieldAliases(fields)
+  var text = ready ? fields.text : lower(fields && fields.text)
+  var acronym = ready ? fields.acronym : acronymOf(name)
+  var nameWords = ready ? fields.words : wordText(name)
 
   var terms = q.split(/\s+/)
   for (var t = 0; t < terms.length; t++) {
-    if (terms[t] && !termMatches(terms[t], name, aliases, text, acronym)) return -1
+    if (terms[t] && !termMatches(terms[t], name, aliases, text, acronym, nameWords)) return -1
   }
 
   var directName = name.indexOf(q)
@@ -258,7 +277,7 @@ function matchScore(query, fields) {
   if (acronymAt === 0) return 5000 - acronym.length
   if (acronymAt > 0) return 4600 - acronymAt * 10 - acronym.length
 
-  var gaps = subsequenceGaps(name, q.replace(/\s+/g, ""))
+  var gaps = subsequenceGaps(nameWords, q.replace(/\s+/g, ""))
   if (gaps >= 0) return 3000 - gaps * 10 - name.length
 
   return -1
@@ -547,9 +566,43 @@ function windowRows(toplevels, query) {
 
 var MENU_CONFIRM = /^system\.(logout|reboot|shutdown|hibernate|suspend)$|^remove\./
 
-function menuRows(items, itemOrder, whenResults, checkedResults, query, usage, now, scope, MenuModel) {
+// Visibility and breadcrumbs cost a tree walk per item, and the menu only
+// changes when its JSONC or its guard batch does. Sources.qml builds this
+// index on those events; every keystroke then scores a flat array.
+function buildMenuIndex(items, itemOrder, whenResults, checkedResults, MenuModel) {
   var map = items || ({})
   var order = Array.isArray(itemOrder) ? itemOrder : []
+  var index = []
+
+  for (var i = 0; i < order.length; i++) {
+    var entry = map[order[i]]
+    if (!entry || entry.id === "root" || entry.id === "apps") continue
+    if (entry.provider) continue
+    if (entry.parent === "apps") continue
+    if (!MenuModel.isVisible(map, order, whenResults, entry, 0)) continue
+
+    var isLeaf = entry.kind === "action" || entry.kind === "link"
+    index.push({
+      id: entry.id,
+      parent: entry.parent,
+      kind: entry.kind,
+      isLeaf: isLeaf,
+      label: MenuModel.labelFor(entry, checkedResults),
+      fields: prepareFields(entry.label, (entry.aliases || []).concat([MenuModel.searchableToken(entry.id)]), MenuModel.pathFor(map, entry.parent)),
+      breadcrumb: MenuModel.pathFor(map, entry.parent),
+      icon: entry.icon || (entry.kind === "menu" ? ICON_SUBMENU : ICON_MENU),
+      iconFont: entry.iconFont || "",
+      action: entry.action || "",
+      target: entry.target || "",
+      confirm: MENU_CONFIRM.test(entry.id),
+      order: typeof entry.order === "number" ? entry.order : i
+    })
+  }
+  return index
+}
+
+function menuRows(menuIndex, query, usage, now, scope) {
+  var index = menuIndex || []
   var out = []
   var scoped = String(scope || "root")
   var browsing = scoped.indexOf("menu:") === 0 ? scoped.slice(5) : ""
@@ -560,49 +613,30 @@ function menuRows(items, itemOrder, whenResults, checkedResults, query, usage, n
 
   if (!browsing && !catalogMode && !q) return out
 
-  for (var i = 0; i < order.length; i++) {
-    var entry = map[order[i]]
-    if (!entry || entry.id === "root" || entry.id === "apps") continue
-    if (entry.provider) continue
-    if (entry.parent === "apps") continue
-    if (!MenuModel.isVisible(map, order, whenResults, entry, 0)) continue
+  for (var i = 0; i < index.length; i++) {
+    var entry = index[i]
+    // Browsing restricts to one submenu's children; the root search sees the
+    // whole tree. Scoring is the same either way.
+    if (browsing && entry.parent !== browsing) continue
+    var score = catalogMode ? 0 : matchScore(q, entry.fields)
+    if (score < 0) continue
 
-    var breadcrumb = MenuModel.pathFor(map, entry.parent)
-    var score
-
-    if (catalogMode) {
-      score = 0
-    } else if (browsing) {
-      if (entry.parent !== browsing) continue
-      score = matchScore(q, { name: entry.label, aliases: entry.aliases || [], text: breadcrumb })
-      if (score < 0) continue
-    } else {
-      score = matchScore(q, {
-        name: entry.label,
-        aliases: (entry.aliases || []).concat([MenuModel.searchableToken(entry.id)]),
-        text: breadcrumb
-      })
-      if (score < 0) continue
-    }
-
-    var isLeaf = entry.kind === "action" || entry.kind === "link"
     var key = "menu:" + entry.id
-    var label = MenuModel.labelFor(entry, checkedResults)
     var primary = entry.kind === "action" ? "Run" : (entry.kind === "link" ? "Open" : "Browse")
 
     out.push(row({
       key: key,
       section: "actions",
-      title: label,
-      subtitle: breadcrumb,
-      icon: entry.icon || (entry.kind === "menu" ? ICON_SUBMENU : ICON_MENU),
-      frecencyKey: isLeaf ? key : "",
-      pinnable: isLeaf,
-      confirm: MENU_CONFIRM.test(entry.id),
+      title: entry.label,
+      subtitle: entry.breadcrumb,
+      icon: entry.icon,
+      frecencyKey: entry.isLeaf ? key : "",
+      pinnable: entry.isLeaf,
+      confirm: entry.confirm,
       primaryLabel: primary,
-      score: score + (isLeaf ? frecencyBonus(usage, key, now) : 0),
-      order: typeof entry.order === "number" ? entry.order : i,
-      payload: { kind: "menu", id: entry.id, itemKind: entry.kind, action: entry.action || "", target: entry.target || "", iconFont: entry.iconFont || "" }
+      score: score + (entry.isLeaf ? frecencyBonus(usage, key, now) : 0),
+      order: entry.order,
+      payload: { kind: "menu", id: entry.id, itemKind: entry.kind, action: entry.action, target: entry.target, iconFont: entry.iconFont }
     }))
   }
   return out
@@ -1804,6 +1838,85 @@ function normalizeConfig(raw) {
   }
 }
 
+// The config sits next to Omarchy's own menu JSONC, so it accepts comments and
+// trailing commas. Regexes cannot do this safely: every quicklink holds a URL
+// with `//` in it, and a snippet can contain anything at all, including `, }`.
+// So the scanner tracks whether it is inside a string and only strips what is
+// outside one.
+function stripJsonComments(raw) {
+  var text = String(raw || "")
+  var out = ""
+  var inString = false
+  var escaped = false
+  var i = 0
+
+  while (i < text.length) {
+    var ch = text.charAt(i)
+
+    if (inString) {
+      out += ch
+      if (escaped) escaped = false
+      else if (ch === "\\") escaped = true
+      else if (ch === "\"") inString = false
+      i += 1
+      continue
+    }
+
+    if (ch === "\"") {
+      inString = true
+      out += ch
+      i += 1
+      continue
+    }
+
+    var next = text.charAt(i + 1)
+    if (ch === "/" && next === "/") {
+      while (i < text.length && text.charAt(i) !== "\n") i += 1
+      continue
+    }
+    if (ch === "/" && next === "*") {
+      i += 2
+      while (i < text.length && !(text.charAt(i) === "*" && text.charAt(i + 1) === "/")) i += 1
+      i += 2
+      continue
+    }
+
+    // A comma is trailing when the next thing that closes is `}` or `]`, with
+    // only whitespace or comments in between.
+    if (ch === ",") {
+      var at = i + 1
+      while (at < text.length) {
+        var ahead = text.charAt(at)
+        if (/\s/.test(ahead)) { at += 1; continue }
+        if (ahead === "/" && text.charAt(at + 1) === "/") {
+          while (at < text.length && text.charAt(at) !== "\n") at += 1
+          continue
+        }
+        if (ahead === "/" && text.charAt(at + 1) === "*") {
+          at += 2
+          while (at < text.length && !(text.charAt(at) === "*" && text.charAt(at + 1) === "/")) at += 1
+          at += 2
+          continue
+        }
+        break
+      }
+      var after = text.charAt(at)
+      if (after === "}" || after === "]") {
+        i += 1
+        continue
+      }
+    }
+
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+function parseConfig(raw) {
+  return parseJson(stripJsonComments(raw))
+}
+
 function parseJson(raw) {
   try {
     var parsed = JSON.parse(String(raw || ""))
@@ -1820,6 +1933,9 @@ function parseEmojis(raw) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    buildMenuIndex: buildMenuIndex,
+    prepareFields: prepareFields,
+    parseConfig: parseConfig,
     SECTIONS: SECTIONS,
     SECTION_TITLES: SECTION_TITLES,
     SECTION_CAPS: SECTION_CAPS,

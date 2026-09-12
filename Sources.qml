@@ -31,6 +31,10 @@ Item {
 
   property var menuItems: ({})
   property var menuOrder: []
+  // Flattened, visibility-resolved menu, rebuilt when the JSONC or the guards
+  // change. Scoring 300-odd rows per keystroke is cheap; walking the tree for
+  // each of them is not.
+  property var menuIndex: []
   property var whenResults: ({})
   property var checkedResults: ({})
   property bool guardsPending: false
@@ -91,8 +95,13 @@ Item {
     var merged = MenuModel.mergeMenuSources(MenuModel.parseMenuJsonc(defaultMenuFile.text()), MenuModel.parseMenuJsonc(userMenuFile.text()))
     root.menuItems = merged.items
     root.menuOrder = merged.itemOrder
+    reindexMenu()
     evaluateGuards()
     root.catalogChanged()
+  }
+
+  function reindexMenu() {
+    root.menuIndex = Model.buildMenuIndex(root.menuItems, root.menuOrder, root.whenResults, root.checkedResults, MenuModel)
   }
 
   // Copied from plugins/menu/Menu.qml: one bash batch answers every `when:`
@@ -310,7 +319,7 @@ Item {
     path: root.home + "/.config/omarchy/omacast.json"
     watchChanges: true
     printErrors: false
-    onLoaded: { root.config = Model.normalizeConfig(Model.parseJson(text())); root.catalogChanged() }
+    onLoaded: { root.config = Model.normalizeConfig(Model.parseConfig(text())); root.catalogChanged() }
     onFileChanged: reload()
     onLoadFailed: { root.config = Model.normalizeConfig(null); root.catalogChanged() }
   }
@@ -387,6 +396,7 @@ Item {
       root.whenResults = nextWhen
       root.checkedResults = nextChecked
       root.guardsRunAt = Date.now()
+      root.reindexMenu()
       root.catalogChanged()
       if (root.guardsPending) Qt.callLater(function() { root.evaluateGuards() })
     }

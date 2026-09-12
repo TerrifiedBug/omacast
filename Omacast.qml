@@ -217,7 +217,7 @@ Item {
     } else if (parsed.scope === "help") {
       rows = Model.helpRows(sources.config, parsed.rest)
     } else if (parsed.scope.indexOf("menu:") === 0) {
-      rows = Model.menuRows(sources.menuItems, sources.menuOrder, sources.whenResults, sources.checkedResults, parsed.rest, usage, now, parsed.scope, MenuModel)
+      rows = Model.menuRows(sources.menuIndex, parsed.rest, usage, now, parsed.scope)
     } else if (!parsed.trimmed) {
       rows = Model.emptyQueryRows({ byKey: catalogByKey(), windowRows: Model.windowRows(sources.toplevels, "") }, sources.store, now)
       caps = { windows: Model.EMPTY_WINDOW_LIMIT }
@@ -233,7 +233,7 @@ Item {
     var rows = Model.answerRows(query)
     rows = rows.concat(Model.appRows(appEntries(query), query, usage, sources.runningApps, now))
     rows = rows.concat(Model.windowRows(sources.toplevels, query))
-    rows = rows.concat(Model.menuRows(sources.menuItems, sources.menuOrder, sources.whenResults, sources.checkedResults, query, usage, now, "root", MenuModel))
+    rows = rows.concat(Model.menuRows(sources.menuIndex, query, usage, now, "root"))
     rows = rows.concat(Model.keybindingRows(sources.keybindingRecords, query))
     rows = rows.concat(Model.quicklinkRows(sources.config.quicklinks, query, usage, now))
     rows = rows.concat(Model.snippetRows(sources.config.snippets, query, usage, now))
@@ -257,7 +257,7 @@ Item {
     var byKey = ({})
     var sets = [
       Model.appRows(appEntries(""), "", usage, sources.runningApps, now),
-      Model.menuRows(sources.menuItems, sources.menuOrder, sources.whenResults, sources.checkedResults, "", usage, now, "catalog", MenuModel),
+      Model.menuRows(sources.menuIndex, "", usage, now, "catalog"),
       Model.quicklinkRows(sources.config.quicklinks, "", usage, now),
       Model.snippetRows(sources.config.snippets, "", usage, now),
       Model.commandRows(sources.config.commands, "", usage, now)

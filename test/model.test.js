@@ -24,6 +24,13 @@ function menu() {
   return MenuModel.mergeMenuSources(MenuModel.parseMenuJsonc(MENU_JSONC), [])
 }
 
+// The surface indexes the menu once per change and scores the flat result, so
+// the tests go through the same two steps.
+function menuIndex(whenResults, checkedResults) {
+  const { items, itemOrder } = menu()
+  return Model.buildMenuIndex(items, itemOrder, whenResults || {}, checkedResults || {}, MenuModel)
+}
+
 function rowsByTitle(rows) {
   const out = {}
   for (const row of rows) out[row.title] = row
@@ -211,8 +218,7 @@ test("parseKeybindingRecords splits combo, label, dispatcher and arg", () => {
 })
 
 test("menuRows searches the tree, hides failing guards and skips providers", () => {
-  const { items, itemOrder } = menu()
-  const rows = Model.menuRows(items, itemOrder, { "system.hibernate": false }, {}, "system", {}, NOW, "root", MenuModel)
+  const rows = Model.menuRows(menuIndex({ "system.hibernate": false }), "system", {}, NOW, "root")
   const titles = rows.map((r) => r.title)
 
   assert.ok(titles.includes("Lock"))
@@ -225,24 +231,21 @@ test("menuRows searches the tree, hides failing guards and skips providers", () 
 })
 
 test("menuRows shows a breadcrumb for nested leaves and nothing for an empty root query", () => {
-  const { items, itemOrder } = menu()
-  const rows = Model.menuRows(items, itemOrder, {}, {}, "screenshot", {}, NOW, "root", MenuModel)
+  const rows = Model.menuRows(menuIndex(), "screenshot", {}, NOW, "root")
 
   assert.equal(rows[0].title, "Screenshot")
   assert.equal(rows[0].subtitle, "Trigger › Capture")
-  assert.deepEqual(Model.menuRows(items, itemOrder, {}, {}, "", {}, NOW, "root", MenuModel), [])
+  assert.deepEqual(Model.menuRows(menuIndex(), "", {}, NOW, "root"), [])
 })
 
 test("menuRows in a submenu scope lists that submenu's direct children", () => {
-  const { items, itemOrder } = menu()
-  const rows = Model.menuRows(items, itemOrder, {}, {}, "", {}, NOW, "menu:system", MenuModel)
+  const rows = Model.menuRows(menuIndex(), "", {}, NOW, "menu:system")
 
   assert.deepEqual(rows.map((r) => r.title).sort(), ["Hibernate", "Lock", "Shutdown"])
 })
 
 test("menuRows marks a checked row and labels submenus Browse", () => {
-  const { items, itemOrder } = menu()
-  const rows = Model.menuRows(items, itemOrder, {}, {}, "capture", {}, NOW, "root", MenuModel)
+  const rows = Model.menuRows(menuIndex(), "capture", {}, NOW, "root")
   const capture = rowsByTitle(rows)["Capture"]
 
   assert.equal(capture.primaryLabel, "Browse")
@@ -363,6 +366,26 @@ test("built-in quicklinks can be dropped one at a time or all at once", () => {
   assert.deepEqual(none.quicklinks, [])
   assert.equal(none.searchQuicklink, null)
   assert.deepEqual(Model.webRows("quickshell", none.searchQuicklink), [])
+})
+
+test("the config accepts comments and trailing commas without touching strings", () => {
+  const text = `{
+    // my quicklinks
+    "quicklinks": [
+      { "name": "Docs", "keyword": "d", "url": "https://example.com/a//b?q={argument}" }, // inline
+      { "name": "Odd", "keyword": "o", "url": "https://x.dev/?q=a,%20}" },
+    ],
+    /* block
+       comment */
+    "snippets": [{ "name": "S", "text": "trailing, } inside a string // not a comment" }],
+  }`
+  const parsed = Model.parseConfig(text)
+
+  assert.equal(parsed.quicklinks[0].url, "https://example.com/a//b?q={argument}")
+  assert.equal(parsed.quicklinks[1].url, "https://x.dev/?q=a,%20}")
+  assert.equal(parsed.snippets[0].text, "trailing, } inside a string // not a comment")
+  assert.equal(Model.parseConfig("{ not json }"), null)
+  assert.equal(Model.parseConfig(""), null)
 })
 
 test("quicklink rows admit a typed keyword above every fuzzy tier", () => {
