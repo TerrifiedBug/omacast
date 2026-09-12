@@ -416,12 +416,17 @@ function parseQuery(text, scope) {
 
   if (current !== "root") return { raw: raw, trimmed: trimmed, scope: current, prefix: "", rest: trimmed }
 
-  if (trimmed.charAt(0) === ":") return { raw: raw, trimmed: trimmed, scope: "emoji", prefix: ":", rest: trimmed.slice(1).trim() }
+  // Prefixes are matched before the trailing space is trimmed away: "cb " is
+  // how a user enters the clipboard scope, and trimming first would leave a
+  // bare "cb" that matches nothing.
+  var lead = raw.replace(/^\s+/, "")
 
-  var clip = trimmed.match(/^(cb|clip|clipboard)\s(.*)$/)
+  if (lead.charAt(0) === ":") return { raw: raw, trimmed: trimmed, scope: "emoji", prefix: ":", rest: lead.slice(1).trim() }
+
+  var clip = lead.match(/^(cb|clip|clipboard)\s([\s\S]*)$/)
   if (clip) return { raw: raw, trimmed: trimmed, scope: "clipboard", prefix: clip[1], rest: clip[2].trim() }
 
-  var files = trimmed.match(/^(f|file|files)\s(.*)$/)
+  var files = lead.match(/^(f|file|files)\s([\s\S]*)$/)
   if (files) return { raw: raw, trimmed: trimmed, scope: "files", prefix: files[1], rest: files[2].trim() }
 
   if (/^(~|\/|\.\.?\/)/.test(trimmed)) return { raw: raw, trimmed: trimmed, scope: "files", prefix: "path", rest: trimmed }
@@ -902,13 +907,19 @@ function rankFile(path, query) {
   return score
 }
 
+// fd prints directories with a trailing slash, which would leave the row with
+// an empty basename. Strip it; the glyph stays neutral either way, and gio
+// open handles a file and a directory the same.
 function fileRows(paths, query, home) {
   var values = paths || []
   var out = []
 
   for (var i = 0; i < values.length; i++) {
-    var path = values[i]
-    if (!path) continue
+    var raw = String(values[i] || "")
+    if (!raw) continue
+    var path = raw.length > 1 ? raw.replace(/\/+$/, "") : raw
+    if (!path) path = "/"
+
     out.push(row({
       key: "file:" + path,
       section: "files",

@@ -250,6 +250,14 @@ test("parseQuery maps prefixes to scopes and lets a pushed scope win", () => {
   assert.equal(pushed.rest, "f omacast")
 })
 
+test("a bare prefix with a trailing space still enters its scope", () => {
+  assert.equal(Model.parseQuery("cb ", "root").scope, "clipboard")
+  assert.equal(Model.parseQuery("cb ", "root").rest, "")
+  assert.equal(Model.parseQuery("f ", "root").scope, "files")
+  assert.equal(Model.parseQuery("cb", "root").scope, "root")
+  assert.equal(Model.parseQuery(":", "root").scope, "emoji")
+})
+
 test("fileRequest browses a directory when the query ends in a slash", () => {
   const parsed = Model.parseQuery("~/coding/", "root")
   assert.deepEqual(Model.fileRequest(parsed, "/home/x"), { dir: "/home/x/coding", terms: [] })
@@ -271,6 +279,14 @@ test("fileRows rank by basename tier first, then depth and hidden penalties", ()
   ])
   assert.equal(rows[0].subtitle, "~")
   assert.ok(Model.rankFile("/home/x/notes.md", "notes") > Model.rankFile("/home/x/.cache/notes.md", "notes"))
+})
+
+test("a directory printed by fd with a trailing slash keeps its name", () => {
+  const rows = Model.fileRows(["/home/x/coding/"], "", "/home/x")
+
+  assert.equal(rows[0].title, "coding")
+  assert.equal(rows[0].subtitle, "~")
+  assert.equal(rows[0].payload.path, "/home/x/coding")
 })
 
 test("quicklink rows admit a typed keyword above every fuzzy tier", () => {
