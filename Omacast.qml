@@ -958,7 +958,11 @@ Item {
     } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
       activate(root.selectedIndex, control || shift)
       event.accepted = true
-    } else if (event.key === Qt.Key_Tab && !shift) {
+    } else if (event.key === Qt.Key_Backtab || (event.key === Qt.Key_Tab && shift)) {
+      // Swallowed on purpose. Left unhandled, Qt would move focus backwards
+      // out of the field, and the palette has nowhere else for focus to go.
+      event.accepted = true
+    } else if (event.key === Qt.Key_Tab) {
       completeSelection()
       event.accepted = true
     } else if (event.key === Qt.Key_Escape) {
