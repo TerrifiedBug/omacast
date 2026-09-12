@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.terrifiedbug.omacast",
+  "name": "OmaCast",
+  "version": "0.1.0",
+  "author": "TerrifiedBug",
+  "license": "MIT",
+  "description": "Tinycast-style command palette: apps, windows, Omarchy actions, keybindings, calculator, quicklinks, snippets, commands, clipboard, emoji and files in one keystroke.",
+  "homepage": "https://github.com/TerrifiedBug/omacast",
+  "kinds": ["overlay"],
+  "keepLoaded": true,
+  "entryPoints": { "overlay": "Omacast.qml" }
+}
