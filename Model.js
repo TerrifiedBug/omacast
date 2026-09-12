@@ -1008,7 +1008,8 @@ function answerRows(query) {
 function webRows(query, engine) {
   var q = String(query || "").trim()
   if (q.length < 2) return []
-  var name = (engine && engine.name) || "the web"
+  if (!engine || !engine.url) return []
+  var name = engine.name
   return [row({
     key: "web:search",
     section: "web",
@@ -1691,11 +1692,28 @@ function normalizeKeyword(value) {
   return KEYWORD_PATTERN.test(keyword) ? keyword : ""
 }
 
-function normalizeQuicklinks(raw) {
-  var out = DEFAULT_QUICKLINKS.slice()
+// Built-ins live in code, not in a generated file, so an upgrade can change
+// them without touching anyone's config. The cost is that a user needs a way
+// to say no to one: `hiddenQuicklinks: ["ddg"]` drops it, and
+// `builtinQuicklinks: false` drops the lot.
+function normalizeQuicklinks(raw, builtins, hidden) {
+  var skip = ({})
+  var hiddenValues = Array.isArray(hidden) ? hidden : []
+  for (var h = 0; h < hiddenValues.length; h++) {
+    if (typeof hiddenValues[h] === "string") skip[hiddenValues[h].toLowerCase()] = true
+  }
+
+  var out = []
+  if (builtins !== false) {
+    for (var b = 0; b < DEFAULT_QUICKLINKS.length; b++) {
+      var builtin = DEFAULT_QUICKLINKS[b]
+      if (skip[builtin.keyword] || skip[builtin.name.toLowerCase()]) continue
+      out.push(builtin)
+    }
+  }
+
   var byKeyword = ({})
   var byName = ({})
-
   for (var d = 0; d < out.length; d++) {
     byKeyword[out[d].keyword] = d
     byName[out[d].name] = true
@@ -1761,7 +1779,7 @@ function normalizeCommands(raw) {
 
 function normalizeConfig(raw) {
   var value = raw && typeof raw === "object" ? raw : ({})
-  var quicklinks = normalizeQuicklinks(value.quicklinks)
+  var quicklinks = normalizeQuicklinks(value.quicklinks, value.builtinQuicklinks, value.hiddenQuicklinks)
 
   var engine = normalizeKeyword(value.searchEngine) || DEFAULT_SEARCH_ENGINE
   var found = null
@@ -1773,10 +1791,12 @@ function normalizeConfig(raw) {
       if (quicklinks[d].keyword === DEFAULT_SEARCH_ENGINE) { found = quicklinks[d]; break }
     }
   }
-  if (!found) found = quicklinks[0] || DEFAULT_QUICKLINKS[0]
+  // Everything removed is a legitimate answer: no quicklinks means no web
+  // fallback row either, rather than a Google row nobody asked for.
+  if (!found) found = quicklinks[0] || null
 
   return {
-    searchEngine: found.keyword || DEFAULT_SEARCH_ENGINE,
+    searchEngine: found ? found.keyword : "",
     searchQuicklink: found,
     quicklinks: quicklinks,
     snippets: normalizeSnippets(value.snippets),

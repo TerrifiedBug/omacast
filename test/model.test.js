@@ -343,6 +343,28 @@ test("? opens the cheat sheet, which lists prefixes and configured keywords", ()
   assert.equal(clipboard.accessory, "Prefix")
 })
 
+test("built-in quicklinks can be dropped one at a time or all at once", () => {
+  const some = Model.normalizeConfig({ hiddenQuicklinks: ["ddg", "AUR"] })
+  const keywords = some.quicklinks.map((q) => q.keyword)
+  assert.ok(!keywords.includes("ddg"))
+  assert.ok(!keywords.includes("aur"))
+  assert.ok(keywords.includes("g"))
+
+  const own = Model.normalizeConfig({
+    builtinQuicklinks: false,
+    quicklinks: [{ name: "Kagi", keyword: "k", url: "https://kagi.com/search?q={argument}" }],
+    searchEngine: "k"
+  })
+  assert.deepEqual(own.quicklinks.map((q) => q.keyword), ["k"])
+  assert.equal(own.searchEngine, "k")
+  assert.equal(Model.webRows("quickshell", own.searchQuicklink)[0].title, "Search Kagi for “quickshell”")
+
+  const none = Model.normalizeConfig({ builtinQuicklinks: false })
+  assert.deepEqual(none.quicklinks, [])
+  assert.equal(none.searchQuicklink, null)
+  assert.deepEqual(Model.webRows("quickshell", none.searchQuicklink), [])
+})
+
 test("quicklink rows admit a typed keyword above every fuzzy tier", () => {
   const rows = Model.quicklinkRows(Model.DEFAULT_QUICKLINKS, "gh quickshell", {}, NOW)
   assert.equal(rows[0].title, "GitHub: quickshell")
@@ -420,7 +442,9 @@ test("answerRows publish one calculation and one link row", () => {
   assert.deepEqual(Model.answerRows("firefox"), [])
 })
 
-test("webRows only appear for a real query", () => {
-  assert.equal(Model.webRows("q", { name: "Google" }).length, 0)
-  assert.equal(Model.webRows("quickshell", { name: "Google" })[0].primaryLabel, "Search")
+test("webRows need a real query and a configured engine", () => {
+  const engine = { name: "Google", keyword: "g", url: "https://www.google.com/search?q={argument}" }
+  assert.equal(Model.webRows("q", engine).length, 0)
+  assert.equal(Model.webRows("quickshell", engine)[0].primaryLabel, "Search")
+  assert.equal(Model.webRows("quickshell", null).length, 0)
 })

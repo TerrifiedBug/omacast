@@ -111,6 +111,17 @@ default. A user quicklink with the same keyword as a built-in replaces it, so
 `"keyword": "gh"` points `gh` at your own search. Built-in keywords are `g`,
 `ddg`, `yt`, `gh`, `aw`, `aur` and `w`.
 
+The built-ins live in the plugin, not in your config, so an update can fix a
+search URL without touching your file. To get rid of one, name it in
+`hiddenQuicklinks`:
+
+```json
+{ "hiddenQuicklinks": ["ddg", "aur"] }
+```
+
+To start from nothing and bring your own, set `"builtinQuicklinks": false`. With
+no quicklinks left there is no web fallback row either.
+
 Quicklinks, snippets and commands all take the same tokens: `{argument}`,
 `{clipboard}`, `{selection}`, `{date}`, `{time}`, `{datetime}`, `{day}` and
 `{uuid}`. `{date}` and friends take a `format` attribute built from `yyyy MM dd

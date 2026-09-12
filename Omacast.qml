@@ -487,6 +487,7 @@ Item {
       var link = sources.config.searchQuicklink
       var query = payload.query
       dismiss()
+      if (!link) return
       sources.resolveTemplate(link.url, query, "url", function(url) { openDestination(url) })
       return
     }
