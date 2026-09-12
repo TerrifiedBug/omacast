@@ -455,10 +455,11 @@ function parseQuery(text, scope) {
   var files = lead.match(/^(f|file|files)\s([\s\S]*)$/)
   if (files) return { raw: raw, trimmed: trimmed, scope: "files", prefix: files[1], rest: files[2].trim() }
 
-  // `w` belongs to the Wikipedia quicklink, so windows takes the spelled-out
-  // prefix. Every scope has one; the cheat sheet lists them.
-  var wins = lead.match(/^(win|window|windows)\s([\s\S]*)$/)
-  if (wins) return { raw: raw, trimmed: trimmed, scope: "windows", prefix: wins[1], rest: wins[2].trim() }
+  // `w` belongs to the Wikipedia quicklink, so windows takes `win `. Only that
+  // spelling: `window gaps` and `windows ` are things people search the menu
+  // for, and a prefix would swallow them.
+  var wins = lead.match(/^win\s([\s\S]*)$/)
+  if (wins) return { raw: raw, trimmed: trimmed, scope: "windows", prefix: "win", rest: wins[1].trim() }
 
   if (/^(~|\/|\.\.?\/)/.test(trimmed)) return { raw: raw, trimmed: trimmed, scope: "files", prefix: "path", rest: trimmed }
 

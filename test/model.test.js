@@ -266,16 +266,18 @@ test("parseQuery maps prefixes to scopes and lets a pushed scope win", () => {
   assert.equal(pushed.rest, "f omacast")
 })
 
-test("every scope has a typed prefix, and win does not steal the w quicklink", () => {
+test("every scope has a typed prefix, and only win claims one for windows", () => {
   assert.equal(Model.parseQuery("win chrome", "root").scope, "windows")
   assert.equal(Model.parseQuery("win chrome", "root").rest, "chrome")
-  assert.equal(Model.parseQuery("windows ", "root").scope, "windows")
+  assert.equal(Model.parseQuery("win ", "root").scope, "windows")
+  // These belong to the menu and the quicklinks, not to the window list.
+  assert.equal(Model.parseQuery("window gaps", "root").scope, "root")
+  assert.equal(Model.parseQuery("windows ", "root").scope, "root")
   assert.equal(Model.parseQuery("w quickshell", "root").scope, "root")
 
   const tokens = Model.helpRows(Model.normalizeConfig(null), "").map((r) => r.title)
   for (const token of ["?", ":", "cb", "f", "win", "~/"]) assert.ok(tokens.includes(token), token)
 })
-
 
 test("a bare prefix with a trailing space still enters its scope", () => {
   assert.equal(Model.parseQuery("cb ", "root").scope, "clipboard")
