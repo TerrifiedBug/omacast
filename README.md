@@ -39,6 +39,21 @@ the same, add this to `~/.config/hypr/hyprland.lua`:
 hl.layer_rule({ match = { namespace = "omarchy-omacast" }, no_anim = true, animation = "none" })
 ```
 
+## Remove
+
+```bash
+omarchy plugin remove io.github.terrifiedbug.omacast
+```
+
+Then delete the `o.bind("ALT + SPACE", "OmaCast", …)` line from
+`~/.config/hypr/bindings.lua` and run `hyprctl reload`. The plugin leaves two
+files behind that you may also want gone:
+
+```bash
+rm ~/.local/state/omarchy/omacast-state.json   # pins and usage counts
+rm ~/.config/omarchy/omacast.json               # your config, if you created one
+```
+
 ## What it answers
 
 | Type this | You get |
