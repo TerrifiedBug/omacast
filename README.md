@@ -1,14 +1,13 @@
 # OmaCast
 
-A command palette for Omarchy. One keystroke, one card, and it answers with apps,
-open windows, every Omarchy menu action, your keybindings, arithmetic, unit
-conversions, quicklinks, snippets, shell commands, clipboard history, emoji and
-files.
+A command palette for Omarchy. One keystroke, one card, and it answers with
+apps, windows, menu actions, keybindings, maths, quicklinks, snippets,
+clipboard history, emoji and files.
 
 ![OmaCast](preview.png)
 
-It runs inside the existing `omarchy-shell` process. No daemon, no second
-Quickshell, no network access except the URLs you activate.
+It runs inside the existing `omarchy-shell` process, so there is no daemon and
+no second Quickshell.
 
 ## Install
 
@@ -25,15 +24,15 @@ o.bind("ALT + SPACE", "OmaCast", "omarchy-shell shell toggle io.github.terrified
 `ALT + SPACE` is free in stock Omarchy, so `SUPER + SPACE` stays the Omarchy
 menu. Run `hyprctl reload` after editing the file.
 
-You can open it straight into a scope or with the field prefilled:
+You can also open it straight into a scope, or with the field prefilled:
 
 ```lua
 o.bind("SUPER + SHIFT + V", "Clipboard", "omarchy-shell shell toggle io.github.terrifiedbug.omacast '{\"scope\":\"clipboard\"}'")
 o.bind("SUPER + SHIFT + G", "GitHub search", "omarchy-shell shell toggle io.github.terrifiedbug.omacast '{\"query\":\"gh \"}'")
 ```
 
-The stock menu pops instantly because Hyprland skips its layer animation. To get
-the same, add this to `~/.config/hypr/hyprland.lua`:
+Hyprland animates the layer on open. To make it pop like the stock menu, add
+this to `~/.config/hypr/hyprland.lua`:
 
 ```lua
 hl.layer_rule({ match = { namespace = "omarchy-omacast" }, no_anim = true, animation = "none" })
@@ -45,9 +44,9 @@ hl.layer_rule({ match = { namespace = "omarchy-omacast" }, no_anim = true, anima
 omarchy plugin remove io.github.terrifiedbug.omacast
 ```
 
-Then delete the `o.bind("ALT + SPACE", "OmaCast", …)` line from
-`~/.config/hypr/bindings.lua` and run `hyprctl reload`. The plugin leaves two
-files behind that you may also want gone:
+Then drop the `o.bind("ALT + SPACE", "OmaCast", …)` line from
+`~/.config/hypr/bindings.lua` and run `hyprctl reload`. Two files are left
+behind if you want them gone:
 
 ```bash
 rm ~/.local/state/omarchy/omacast-state.json   # pins and usage counts
@@ -73,12 +72,8 @@ rm ~/.config/omarchy/omacast.json               # your config, if you created on
 | `?` | The cheat sheet: every prefix and keyword you have configured |
 
 An empty field shows your pinned rows, then what you use most, then your open
-windows.
-
-Ranking is the launcher's own tier order (exact prefix beats an alias, which
-beats a substring, which beats an acronym), plus a small bonus for what you
-launch often. The bonus is capped well below the gap between tiers, so typing
-the exact name of a rarely used app still puts it first.
+windows. Ranking is the launcher's own tier order plus a small bonus for what
+you launch often, capped so the exact name of a rarely used app still wins.
 
 ## Keys
 
@@ -95,20 +90,19 @@ the exact name of a rarely used app still puts it first.
 | `Backspace` on an empty field | Leave the current scope |
 | `Esc` | Clear the confirmation, then the field, then the scope, then close |
 
-Destructive menu rows (shutdown, reboot, logout, hibernate, suspend, and every
+Destructive menu rows (shutdown, reboot, logout, hibernate, suspend and every
 `Remove` row) need Enter twice. The footer says so while the first press is
 armed.
 
 ## Configuration
 
-Config lives in `~/.config/omarchy/omacast.json`, and it does not exist until
-you want it. Search the palette for `config` and press Enter: the OmaCast
-Config row copies `omacast.example.json` into place on first use and opens it
-in your editor. As shipped that file changes nothing, it just documents the
-keys with empty lists to fill in.
+Config lives in `~/.config/omarchy/omacast.json` and does not exist until you
+want it. Search the palette for `config` and press Enter: that row copies
+`omacast.example.json` into place and opens it in your editor. The example
+changes nothing on its own, it just documents the keys.
 
-Comments and trailing commas are fine, the same way Omarchy's own menu JSONC
-allows them. Saving applies immediately, with no restart.
+Comments and trailing commas are fine, like Omarchy's own menu JSONC. Saving
+applies immediately, with no restart.
 
 ```json
 {
@@ -129,42 +123,31 @@ allows them. Saving applies immediately, with no restart.
 ```
 
 `searchEngine` is the keyword of the quicklink used for the web fallback, `g` by
-default. A user quicklink with the same keyword as a built-in replaces it, so
-`"keyword": "gh"` points `gh` at your own search. Built-in keywords are `g`,
-`ddg`, `yt`, `gh`, `aw`, `aur` and `w`.
+default. Built-ins are `g`, `ddg`, `yt`, `gh`, `aw`, `aur` and `w`. They live in
+the plugin, so an update can fix a search URL without touching your file, and
+your own quicklink with the same keyword wins. Hide one with
+`{ "hiddenQuicklinks": ["ddg", "aur"] }`, or set `"builtinQuicklinks": false` to
+start from nothing, which drops the web fallback row too.
 
-The built-ins live in the plugin, not in your config, so an update can fix a
-search URL without touching your file. To get rid of one, name it in
-`hiddenQuicklinks`:
-
-```json
-{ "hiddenQuicklinks": ["ddg", "aur"] }
-```
-
-To start from nothing and bring your own, set `"builtinQuicklinks": false`. With
-no quicklinks left there is no web fallback row either.
-
-Quicklinks, snippets and commands all take the same tokens: `{argument}`,
+Quicklinks, snippets and commands take the same tokens: `{argument}`,
 `{clipboard}`, `{selection}`, `{date}`, `{time}`, `{datetime}`, `{day}` and
-`{uuid}`. `{date}` and friends take a `format` attribute built from `yyyy MM dd
-HH mm ss`. Pipe modifiers are `trim`, `uppercase`, `lowercase`,
+`{uuid}`. `{date}` and friends take a `format` attribute built from
+`yyyy MM dd HH mm ss`. Pipe modifiers are `trim`, `uppercase`, `lowercase`,
 `percent-encode` and `raw`. Values in a URL are percent-encoded unless you ask
 for `raw`.
 
 Command arguments are passed as positional parameters, so `rb --clean` runs
-`make -C ~/site build "--clean"` without a shell re-parsing anything you typed.
+`make -C ~/site build "--clean"` without a shell re-parsing what you typed.
 
 ## State
 
-Pins and usage counts live in `~/.local/state/omarchy/omacast-state.json`. Delete
-it to start over:
+Pins and usage counts live in `~/.local/state/omarchy/omacast-state.json`. It
+keeps at most 400 keys, decayed by age, and stores nothing about what you
+searched. Delete it to start over:
 
 ```bash
 rm ~/.local/state/omarchy/omacast-state.json && omarchy-restart-shell
 ```
-
-It keeps at most 400 keys, decayed by age, and stores nothing about what you
-searched.
 
 ## Dependencies
 
@@ -178,21 +161,18 @@ Everything here ships with Omarchy.
 | `jq` | Used by the stock clipboard helpers OmaCast calls |
 | `bash` | Menu actions, guards, keybinding dispatch |
 
-## What leaves your machine
-
-The URLs you activate, when they open in your browser. Everything else is local:
-apps come from your desktop entries, actions from the menu JSONC, clipboard from
-the stock history file, files from `fd` on your own disk.
+Nothing leaves your machine except the URLs you activate, when they open in your
+browser. Apps come from your desktop entries, actions from the menu JSONC,
+clipboard from the stock history file, files from `fd` on your own disk.
 
 ## What it reuses from Omarchy
-
-Two pieces, so the palette agrees with the rest of the desktop about what your
-apps and menu actions are:
 
 `shell/services/AppLibrary.qml` is loaded at runtime for the app list, its icon
 index, hidden-entry filtering and launch feedback. `shell/plugins/menu/MenuModel.js`
 is vendored in `vendor/` to parse the menu JSONC and build the same `when:` and
-`checked:` guard batch the menu runs. Both are MIT, see `NOTICE`.
+`checked:` guard batch the menu runs. Both are MIT, see `NOTICE`. Sharing them
+keeps the palette in agreement with the rest of the desktop about what your apps
+and menu actions are.
 
 Verified against Omarchy 4.0.3 with Quickshell 0.3.1.
 
