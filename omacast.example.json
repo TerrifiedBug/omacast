@@ -24,5 +24,18 @@
   // Words after the keyword arrive as "$@", never spliced into the string.
   // "terminal": true runs it in a floating terminal, "confirm": true asks first.
   // { "name": "Prune docker", "keyword": "prune", "command": "docker system prune -f", "confirm": true }
-  "commands": []
+  "commands": [],
+
+  // Extra folders of Raycast-format script commands, beside the default
+  // ~/.config/omarchy/omacast/scripts. "~/" means your home.
+  "scriptDirs": [],
+
+  // The preview pane beside the list, on screens at least 1400 px wide.
+  "preview": true,
+
+  // Off unless you turn them on. "currency" downloads the ECB reference
+  // rates at most once a day; "ai" adds an "Ask <agent>" row that hands the
+  // query to `omarchy agent prompt`.
+  "currency": false,
+  "ai": false
 }

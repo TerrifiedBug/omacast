@@ -2,12 +2,20 @@
   "schemaVersion": 1,
   "id": "io.github.terrifiedbug.omacast",
   "name": "OmaCast",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "TerrifiedBug",
   "license": "MIT",
-  "description": "Tinycast-style command palette: apps, windows, Omarchy actions, keybindings, calculator, quicklinks, snippets, commands, clipboard, emoji and files in one keystroke.",
+  "description": "Tinycast-style command palette: apps, windows, Omarchy actions and commands, keybindings, calculator, dates and time zones, colours, reminders, quicklinks, snippets, script commands, clipboard, emoji and files in one keystroke.",
   "homepage": "https://github.com/TerrifiedBug/omacast",
-  "kinds": ["overlay"],
+  "kinds": ["overlay", "bar-widget"],
   "keepLoaded": true,
-  "entryPoints": { "overlay": "Omacast.qml" }
+  "entryPoints": { "overlay": "Omacast.qml", "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "description": "A search button that opens the OmaCast palette. Hidden until you turn it on.",
+    "defaultSection": "right",
+    "defaults": { "button": false },
+    "schema": [
+      { "key": "button", "type": "boolean", "label": "Show the button", "description": "Show a search button in the bar that opens the palette.", "defaultValue": false }
+    ]
+  }
 }

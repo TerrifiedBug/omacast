@@ -47,6 +47,57 @@ Item {
   property bool emojiWanted: false
   property var filePaths: []
 
+  // `kill ` scope: the process list, polled every 2 s while the scope is open.
+  property bool processesWanted: false
+  property var processes: []
+
+  // `omarchy commands --json`, filtered to argument-free commands, and the
+  // same list with menu duplicates dropped and match fields prepared.
+  property var commandList: []
+  property var commandCatalog: []
+  property double commandsRunAt: 0
+
+  property var themes: ({ current: "", names: [] })
+  property double themesRunAt: 0
+
+  // One `date` batch at a time; its answer is keyed by the request's query so
+  // a landing for an older query is ignored rather than shown.
+  property var tzResult: ({ key: "", output: "" })
+  property var pendingZone: null
+
+  // One preview process at a time, keyed by the selected row.
+  property var previewResult: ({ key: "", text: "" })
+  property string previewWantedKey: ""
+  property var pendingPreview: null
+
+  // Content search mirrors fd: one rg run, a queued follow-up, a kill timer.
+  property var contentPaths: []
+  property string contentTerm: ""
+  property var pendingContent: null
+  property int contentGeneration: 0
+  property int contentActiveGeneration: 0
+
+  // Script commands: the folders' fingerprint, the parsed scripts, and the
+  // first stdout line of each inline script with when it ran.
+  readonly property string scriptDir: root.home + "/.config/omarchy/omacast/scripts"
+  readonly property var scriptDirs: {
+    var out = [root.scriptDir]
+    var extra = root.config.scriptDirs || []
+    for (var i = 0; i < extra.length; i++) out.push(Model.expandHome(extra[i], root.home))
+    return out
+  }
+  property string scriptSignature: ""
+  property var scripts: []
+  property var inlineOutputs: ({})
+  property var inlineRunAt: ({})
+  property var inlineQueue: []
+  property string inlineActivePath: ""
+
+  // Opt-in network and agent state.
+  readonly property string ratesPath: root.home + "/.cache/omarchy/omacast-rates.xml"
+  property var rates: null
+  property string agentName: ""
+
   // Milliseconds of the last successful run; the open path re-runs only what
   // has gone stale so a summon never waits on bash.
   property double guardsRunAt: 0
@@ -58,14 +109,23 @@ Item {
 
   property var pendingTemplate: null
   property string pasteStage: ""
+  property double openedAt: 0
 
   signal catalogChanged()
 
   function onOpen() {
+    root.openedAt = Date.now()
     if (root.appLibrary) root.appLibrary.refreshIcons()
     refreshToplevels()
-    if (Date.now() - root.guardsRunAt > 30000) evaluateGuards()
-    if (Date.now() - root.bindsRunAt > 60000) loadKeybindings()
+    var now = Date.now()
+    if (now - root.guardsRunAt > 30000) evaluateGuards()
+    if (now - root.bindsRunAt > 60000) loadKeybindings()
+    if (now - root.commandsRunAt > 60000) loadCommandCatalog()
+    if (now - root.themesRunAt > 60000) loadThemes()
+    scanScripts()
+    queueInlineScripts()
+    if (root.config.currency) fetchRates(false)
+    if (root.config.ai) loadAgent()
   }
 
   // ---- Frecency state
@@ -74,15 +134,36 @@ Item {
     if (!key) return
     var now = Date.now()
     var usage = Model.pruneUsage(Model.bump(root.store.usage, key, now), now, 400)
-    root.store = { version: 1, usage: usage, pins: root.store.pins }
+    setStore(Model.updateState(root.store, { usage: usage }))
+  }
+
+  function setStore(next) {
+    root.store = next
     saveTimer.restart()
   }
 
   function togglePin(key) {
     if (!key) return
-    root.store = Model.togglePin(root.store, key)
-    saveTimer.restart()
+    setStore(Model.togglePin(root.store, key))
     root.catalogChanged()
+  }
+
+  function toggleHidden(key) {
+    if (!key) return
+    setStore(Model.toggleHidden(root.store, key))
+    root.catalogChanged()
+  }
+
+  function resetUsage(key) {
+    if (!key) return
+    setStore(Model.resetUsage(root.store, key))
+    root.catalogChanged()
+  }
+
+  // Saved on close, so ↑ in an empty field can bring back what was typed.
+  function rememberQuery(text) {
+    var next = Model.rememberQuery(root.store, text)
+    if (next.lastQuery !== root.store.lastQuery) setStore(next)
   }
 
   function isPinned(key) {
@@ -102,6 +183,211 @@ Item {
 
   function reindexMenu() {
     root.menuIndex = Model.buildMenuIndex(root.menuItems, root.menuOrder, root.whenResults, root.checkedResults, MenuModel)
+    rebuildCommandCatalog()
+  }
+
+  // ---- omarchy commands and themes, refreshed on open once they are a
+  // minute old
+
+  function loadCommandCatalog() {
+    if (commandsProc.running) return
+    commandsProc.running = true
+  }
+
+  function rebuildCommandCatalog() {
+    root.commandCatalog = Model.buildCommandCatalog(root.commandList, root.menuIndex)
+  }
+
+  function loadThemes() {
+    if (themesProc.running) return
+    themesProc.running = true
+  }
+
+  // ---- Processes
+
+  function wantProcesses(wanted) {
+    root.processesWanted = wanted === true
+    if (!root.processesWanted) root.processes = []
+  }
+
+  function loadProcesses() {
+    if (processProc.running) return
+    processProc.running = true
+  }
+
+  function signalProcess(pid, force) {
+    if (!/^\d+$/.test(String(pid))) return
+    Quickshell.execDetached(force ? ["kill", "-KILL", String(pid)] : ["kill", String(pid)])
+    procRefresh.restart()
+  }
+
+  // ---- Time zones
+
+  function requestTimeZone(request) {
+    if (!request) return
+    if (request.key === root.tzResult.key) return
+    if (zoneProc.running) {
+      if (request.key !== zoneProc.runKey) root.pendingZone = request
+      return
+    }
+    zoneProc.runKey = request.key
+    zoneProc.command = Model.timeZoneCommand(request)
+    zoneProc.running = true
+  }
+
+  // ---- Preview
+  //
+  // Selecting another row kills the running preview and queues the new one,
+  // which starts from onExited. A killed run's output carries its own key,
+  // so it can never land under the row selected after it.
+
+  function requestPreview(key, argv) {
+    if (key === root.previewResult.key) {
+      root.previewWantedKey = key
+      root.pendingPreview = null
+      return
+    }
+    if (key === root.previewWantedKey) return
+    root.previewWantedKey = key
+    root.pendingPreview = argv ? { key: key, argv: argv } : null
+    if (previewProc.running) {
+      previewProc.running = false
+      return
+    }
+    startPendingPreview()
+  }
+
+  function startPendingPreview() {
+    var next = root.pendingPreview
+    root.pendingPreview = null
+    if (!next || previewProc.running) return
+    previewProc.runKey = next.key
+    previewProc.command = next.argv
+    previewProc.running = true
+  }
+
+  function cancelPreview() {
+    root.previewWantedKey = ""
+    root.pendingPreview = null
+    previewProc.running = false
+  }
+
+  // ---- Content search
+
+  function searchContent(term) {
+    root.contentGeneration += 1
+    var request = { term: term, generation: root.contentGeneration }
+    if (term.length < 3) {
+      root.contentPaths = []
+      root.contentTerm = term
+      root.catalogChanged()
+      return
+    }
+    if (rgProc.running) {
+      root.pendingContent = request
+      return
+    }
+    runContentSearch(request)
+  }
+
+  function runContentSearch(request) {
+    root.contentActiveGeneration = request.generation
+    root.contentTerm = request.term
+    rgProc.command = ["rg", "--files-with-matches", "--max-count", "1", "--max-filesize", "2M", "--ignore-case", "--fixed-strings", "--hidden",
+      "--glob", "!.git", "--glob", "!node_modules", "--glob", "!.cache", "--", request.term, root.home]
+    rgProc.running = true
+    rgKill.restart()
+  }
+
+  function cancelContent() {
+    rgKill.stop()
+    root.pendingContent = null
+    root.contentGeneration += 1
+    if (rgProc.running) rgProc.running = false
+  }
+
+  // ---- Script commands
+  //
+  // Each open fingerprints the folders (path, mtime and mode of every file)
+  // and only re-reads the headers when that changes.
+
+  function scanScripts() {
+    if (scriptsProc.running) return
+    var script = 'prev=$1; shift; sig=$(find "$@" -maxdepth 1 -type f -printf "%p %T@ %m\\n" 2>/dev/null | sort | md5sum | cut -d" " -f1); '
+      + 'printf "%s\\n" "$sig"; [ "$sig" = "$prev" ] && exit 0; '
+      + 'find "$@" -maxdepth 1 -type f -print0 2>/dev/null | sort -z | while IFS= read -r -d "" f; do x=0; [ -x "$f" ] && x=1; printf "\\036%s\\037%s\\037" "$f" "$x"; head -c 8192 -- "$f"; done'
+    scriptsProc.command = ["bash", "-c", script, "bash", root.scriptSignature].concat(root.scriptDirs)
+    scriptsProc.running = true
+  }
+
+  function queueInlineScripts() {
+    var now = Date.now()
+    var queue = []
+    for (var i = 0; i < root.scripts.length; i++) {
+      var s = root.scripts[i]
+      if (s.meta.mode !== "inline" || !s.executable) continue
+      var ranAt = root.inlineRunAt[s.path] || 0
+      // Without a refreshTime an inline script runs once per open.
+      var fresh = s.meta.refreshMs > 0 ? now - ranAt < s.meta.refreshMs : ranAt >= root.openedAt
+      var queued = queue.indexOf(s.path) >= 0 || root.inlineQueue.indexOf(s.path) >= 0 || root.inlineActivePath === s.path
+      if (!fresh && !queued) queue.push(s.path)
+    }
+    root.inlineQueue = root.inlineQueue.concat(queue)
+    runNextInline()
+  }
+
+  function runNextInline() {
+    if (inlineProc.running || root.inlineQueue.length === 0) return
+    var queue = root.inlineQueue.slice()
+    root.inlineActivePath = queue.shift()
+    root.inlineQueue = queue
+    inlineProc.command = ["bash", "-c", 'timeout 10 "$0" 2>/dev/null | head -c ' + Model.SCRIPT_OUTPUT_LIMIT, root.inlineActivePath]
+    inlineProc.running = true
+  }
+
+  function rerunInline(path) {
+    var at = ({})
+    for (var k in root.inlineRunAt) if (k !== path) at[k] = root.inlineRunAt[k]
+    root.inlineRunAt = at
+    root.inlineQueue = root.inlineQueue.concat([path])
+    runNextInline()
+  }
+
+  // Compact mode: run with a 10 s cap and hand the last stdout line to a
+  // notification, the way Raycast shows it in its HUD.
+  function runCompact(path, args, title) {
+    if (compactProc.running) return
+    compactProc.title = title
+    compactProc.command = ["bash", "-c", 'set -o pipefail; timeout 10 "$0" "$@" 2>/dev/null | head -c ' + Model.SCRIPT_OUTPUT_LIMIT, path].concat(args || [])
+    compactProc.running = true
+  }
+
+  // ---- Currency (opt-in): one ECB request a day at most, gated on the
+  // cached file's age, printed back so the same process delivers the rates.
+
+  function fetchRates(force) {
+    if (ratesProc.running) return
+    var script = 'f=$1; force=$2; mkdir -p "$(dirname "$f")"; '
+      + 'if [ "$force" = 1 ] || [ ! -s "$f" ] || [ -n "$(find "$f" -mmin +1440 2>/dev/null)" ]; then '
+      + 'curl -fsSL --max-time 10 -o "$f.tmp" "https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml" && mv -f "$f.tmp" "$f"; rm -f "$f.tmp"; fi; '
+      + '[ -s "$f" ] && cat "$f"'
+    ratesProc.command = ["bash", "-c", script, "bash", root.ratesPath, force ? "1" : "0"]
+    ratesProc.running = true
+  }
+
+  function loadAgent() {
+    if (agentProc.running) return
+    agentProc.running = true
+  }
+
+  // ---- Clipboard edits, written the way the stock clipboard writes them
+
+  function deleteClipboardEntry(historyIndex) {
+    var next = Model.removeClipboardEntry(clipboardFile.text(), historyIndex)
+    if (next === null) return
+    clipboardFile.setText(next)
+    root.clipboardEntries = Model.parseClipboard(next)
+    root.catalogChanged()
   }
 
   // Copied from plugins/menu/Menu.qml: one bash batch answers every `when:`
@@ -293,6 +579,20 @@ Item {
     guardProc.running = false
     bindsProc.running = false
     pasteProc.running = false
+    procPoll.stop()
+    procRefresh.stop()
+    rgKill.stop()
+    processProc.running = false
+    commandsProc.running = false
+    themesProc.running = false
+    zoneProc.running = false
+    previewProc.running = false
+    rgProc.running = false
+    scriptsProc.running = false
+    inlineProc.running = false
+    compactProc.running = false
+    ratesProc.running = false
+    agentProc.running = false
   }
 
   Loader {
@@ -425,6 +725,7 @@ Item {
   FileView {
     id: clipboardFile
     path: root.home + "/.local/state/omarchy/clipboard-history.json"
+    atomicWrites: true
     printErrors: false
     onLoaded: { root.clipboardEntries = Model.parseClipboard(text()); root.catalogChanged() }
     onLoadFailed: { root.clipboardEntries = []; root.catalogChanged() }
@@ -478,6 +779,223 @@ Item {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.finishTemplate(text)
+    }
+  }
+
+  // ---- omarchy commands, themes
+
+  Process {
+    id: commandsProc
+    command: ["omarchy", "commands", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var list = Model.parseCommandCatalog(text)
+        if (list.length === 0) return
+        root.commandList = list
+        root.commandsRunAt = Date.now()
+        root.rebuildCommandCatalog()
+        root.catalogChanged()
+      }
+    }
+  }
+
+  Process {
+    id: themesProc
+    command: ["bash", "-c", "omarchy theme current; echo ---; omarchy theme list"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var parsed = Model.parseThemes(text)
+        if (parsed.names.length === 0) return
+        root.themes = parsed
+        root.themesRunAt = Date.now()
+        root.catalogChanged()
+      }
+    }
+  }
+
+  // ---- Processes: the first line is the pids never to list, the shell
+  // itself ($PPID of this bash), its parent, and this helper.
+
+  Process {
+    id: processProc
+    command: ["bash", "-c", 'self=$PPID; parent=$(ps -o ppid= -p "$self" | tr -d " "); echo "$self $parent $$"; exec ps -u "$USER" -o pid=,pcpu=,pmem=,comm= --sort=-pcpu']
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (!root.processesWanted) return
+        root.processes = Model.parseProcesses(text)
+        root.catalogChanged()
+      }
+    }
+  }
+
+  Timer {
+    id: procPoll
+    interval: 2000
+    repeat: true
+    triggeredOnStart: true
+    running: root.processesWanted && root.opened
+    onTriggered: root.loadProcesses()
+  }
+
+  // A signalled process takes a moment to go; look again shortly after.
+  Timer {
+    id: procRefresh
+    interval: 300
+    onTriggered: root.loadProcesses()
+  }
+
+  // ---- Time zones
+
+  Process {
+    id: zoneProc
+    property string runKey: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.tzResult = { key: zoneProc.runKey, output: text }
+        root.catalogChanged()
+      }
+    }
+    onExited: {
+      var pending = root.pendingZone
+      root.pendingZone = null
+      if (pending) Qt.callLater(function() { root.requestTimeZone(pending) })
+    }
+  }
+
+  // ---- Preview
+
+  Process {
+    id: previewProc
+    property string runKey: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (previewProc.runKey !== root.previewWantedKey) return
+        root.previewResult = { key: previewProc.runKey, text: Model.cleanPreview(text) }
+      }
+    }
+    onExited: Qt.callLater(function() { root.startPendingPreview() })
+  }
+
+  // ---- Content search
+
+  Process {
+    id: rgProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (root.contentActiveGeneration !== root.contentGeneration) return
+        var lines = text.split("\n")
+        var out = []
+        for (var i = 0; i < lines.length && out.length < 200; i++) if (lines[i]) out.push(lines[i])
+        root.contentPaths = out
+        root.catalogChanged()
+      }
+    }
+    onExited: {
+      rgKill.stop()
+      var pending = root.pendingContent
+      root.pendingContent = null
+      if (pending) Qt.callLater(function() { root.runContentSearch(pending) })
+    }
+  }
+
+  // Same budget as fd: past three seconds a palette answer is no answer.
+  Timer {
+    id: rgKill
+    interval: 3000
+    onTriggered: rgProc.running = false
+  }
+
+  // ---- Script commands
+
+  Process {
+    id: scriptsProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var cut = text.indexOf("\n")
+        var signature = cut >= 0 ? text.slice(0, cut) : text.trim()
+        if (!signature || signature === root.scriptSignature) return
+        root.scriptSignature = signature
+        root.scripts = Model.parseScriptRecords(text.slice(cut + 1))
+        root.queueInlineScripts()
+        root.catalogChanged()
+      }
+    }
+  }
+
+  Process {
+    id: inlineProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var path = root.inlineActivePath
+        if (!path) return
+        var outputs = ({})
+        for (var k in root.inlineOutputs) outputs[k] = root.inlineOutputs[k]
+        outputs[path] = Model.firstLine(text)
+        root.inlineOutputs = outputs
+        var at = ({})
+        for (var r in root.inlineRunAt) at[r] = root.inlineRunAt[r]
+        at[path] = Date.now()
+        root.inlineRunAt = at
+        root.catalogChanged()
+      }
+    }
+    onExited: {
+      root.inlineActivePath = ""
+      Qt.callLater(function() { root.runNextInline() })
+    }
+  }
+
+  Process {
+    id: compactProc
+    property string title: ""
+    property string output: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: compactProc.output = text
+    }
+    onExited: function(exitCode) {
+      var line = Model.lastLine(compactProc.output)
+      if (!line) line = exitCode === 0 ? "Done" : "Failed with exit code " + exitCode
+      compactProc.output = ""
+      Quickshell.execDetached(["omarchy", "notification", "send", compactProc.title, line])
+    }
+  }
+
+  // ---- Currency and agent
+
+  Process {
+    id: ratesProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var parsed = Model.parseEcbRates(text)
+        if (!parsed) return
+        root.rates = parsed
+        root.catalogChanged()
+      }
+    }
+  }
+
+  Process {
+    id: agentProc
+    command: ["omarchy", "default", "agent"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var name = Model.firstLine(text)
+        if (name && name !== root.agentName) {
+          root.agentName = name
+          root.catalogChanged()
+        }
+      }
     }
   }
 }

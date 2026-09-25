@@ -11,7 +11,7 @@
 
 // ---- Sections
 
-var SECTIONS = ["answer", "pinned", "recent", "apps", "windows", "actions", "keybindings", "quicklinks", "snippets", "commands", "clipboard", "emoji", "files", "help", "web"]
+var SECTIONS = ["answer", "pinned", "recent", "apps", "windows", "actions", "keybindings", "quicklinks", "snippets", "commands", "clipboard", "emoji", "files", "processes", "hidden", "help", "web"]
 
 var SECTION_TITLES = {
   answer: "Answer",
@@ -27,12 +27,15 @@ var SECTION_TITLES = {
   clipboard: "Clipboard",
   emoji: "Emoji",
   files: "Files",
+  processes: "Processes",
+  hidden: "Hidden",
   help: "Keywords",
   web: "Web"
 }
 
 var SECTION_CAPS = {
-  answer: 1,
+  // Calculator, time zone and colour answers can stack: `#f80` is three rows.
+  answer: 3,
   pinned: 20,
   recent: 8,
   apps: 8,
@@ -45,8 +48,11 @@ var SECTION_CAPS = {
   clipboard: 40,
   emoji: 60,
   files: 20,
+  processes: 200,
+  hidden: 200,
   help: 60,
-  web: 1
+  // The web fallback, with the opt-in AI row above it.
+  web: 2
 }
 
 // Glyphs are Nerd Font literals; the name rides along in a comment so a
@@ -68,6 +74,15 @@ var ICON_SEARCH = ""          // nf-fa-search
 var ICON_CALC = ""            // nf-fa-calculator
 var ICON_LINK = ""            // nf-fa-globe
 var ICON_SETTINGS = ""        // nf-fa-cog
+var ICON_CLOCK = ""           // nf-fa-clock_o
+var ICON_BELL = ""            // nf-fa-bell
+var ICON_BRUSH = ""           // nf-fa-paint_brush
+var ICON_PROCESS = ""         // nf-fa-cogs
+var ICON_CHAT = ""            // nf-fa-comments
+var ICON_MONEY = ""           // nf-fa-money
+var ICON_CODE = ""            // nf-fa-code
+var ICON_FOLDER = ""          // nf-fa-folder
+var ICON_EYE = ""             // nf-fa-eye
 
 function sectionIndex(section) {
   var at = SECTIONS.indexOf(String(section || ""))
@@ -242,12 +257,47 @@ function prepareFields(name, aliases, text) {
   }
 }
 
+// One edit away: a swapped pair, a wrong, missing or extra letter. This is
+// the optimal-string-alignment distance capped at 1, which is all the typo
+// tier needs and never builds a matrix.
+function withinOneEdit(a, b) {
+  if (a === b) return true
+  var la = a.length
+  var lb = b.length
+  if (Math.abs(la - lb) > 1) return false
+  var i = 0
+  while (i < la && i < lb && a.charAt(i) === b.charAt(i)) i += 1
+  if (la === lb) {
+    if (a.slice(i + 1) === b.slice(i + 1)) return true
+    return a.charAt(i) === b.charAt(i + 1) && a.charAt(i + 1) === b.charAt(i) && a.slice(i + 2) === b.slice(i + 2)
+  }
+  if (la > lb) return a.slice(i + 1) === b.slice(i)
+  return a.slice(i) === b.slice(i + 1)
+}
+
+// Short terms are left alone: at three letters one edit reaches half the
+// dictionary. Only whole name words count, so `chrome` never reaches
+// Chromium this way.
+var TYPO_MIN = 4
+var TYPO_SCORE = 1500
+
+function typoMatches(term, words) {
+  if (term.length < TYPO_MIN) return false
+  var parts = words.split(" ")
+  for (var i = 0; i < parts.length; i++) {
+    if (parts[i] && withinOneEdit(term, parts[i])) return true
+  }
+  return false
+}
+
+// 1 is a real match, 2 is a match only through the typo tier, 0 is none.
 function termMatches(term, name, aliases, text, acronym, words) {
-  if (name.indexOf(term) >= 0) return true
-  for (var i = 0; i < aliases.length; i++) if (aliases[i].indexOf(term) >= 0) return true
-  if (text.indexOf(term) >= 0) return true
-  if (term.length <= 5 && acronym.indexOf(term) >= 0) return true
-  return subsequenceGaps(words, term) >= 0
+  if (name.indexOf(term) >= 0) return 1
+  for (var i = 0; i < aliases.length; i++) if (aliases[i].indexOf(term) >= 0) return 1
+  if (text.indexOf(term) >= 0) return 1
+  if (term.length <= 5 && acronym.indexOf(term) >= 0) return 1
+  if (subsequenceGaps(words, term) >= 0) return 1
+  return typoMatches(term, words) ? 2 : 0
 }
 
 function matchScore(query, fields) {
@@ -261,9 +311,13 @@ function matchScore(query, fields) {
   var acronym = ready ? fields.acronym : acronymOf(name)
   var nameWords = ready ? fields.words : wordText(name)
 
+  var typo = false
   var terms = q.split(/\s+/)
   for (var t = 0; t < terms.length; t++) {
-    if (terms[t] && !termMatches(terms[t], name, aliases, text, acronym, nameWords)) return -1
+    if (!terms[t]) continue
+    var hit = termMatches(terms[t], name, aliases, text, acronym, nameWords)
+    if (!hit) return -1
+    if (hit === 2) typo = true
   }
 
   var directName = name.indexOf(q)
@@ -287,7 +341,23 @@ function matchScore(query, fields) {
   var gaps = subsequenceGaps(nameWords, q.replace(/\s+/g, ""))
   if (gaps >= 0) return 3000 - gaps * 10 - name.length
 
+  // Below every real tier and above nothing: `fierfox` should still find
+  // Firefox, but never outrank something the user spelled right.
+  if (typo) return Math.max(1, TYPO_SCORE - name.length)
   return -1
+}
+
+// For names ranked by someone else (the shell's AppSearch): the score of a
+// near miss, meaning a one-typo word or a subsequence that skips at most two
+// letters, else -1. A dropped letter is a subsequence, so `firfox` needs this
+// as much as `fierfox` does.
+function nearMissScore(query, name) {
+  var score = matchScore(query, { name: name, aliases: [], text: "" })
+  if (score <= 0) return -1
+  if (score <= TYPO_SCORE) return score
+  if (score >= 3000) return -1
+  var gaps = subsequenceGaps(wordText(lower(name)), lower(query).replace(/\s+/g, ""))
+  return gaps >= 0 && gaps <= 2 ? score : -1
 }
 
 // ---- Frecency (zoxide's shape: a decayed launch count, bounded)
@@ -298,7 +368,8 @@ var USAGE_LIMIT = 400
 // The empty palette has room the root search does not: nothing competes with
 // the window list there.
 var EMPTY_WINDOW_LIMIT = 8
-var USAGE_KEY = /^(app|menu|bind|ql|snip|cmd):[^\x00-\x1f]{1,240}$/
+var USAGE_KEY = /^(app|menu|bind|ql|snip|cmd|oc|theme|sc):[^\x00-\x1f]{1,240}$/
+var LAST_QUERY_LIMIT = 240
 
 function decay(ageMs) {
   var age = typeof ageMs === "number" && isFinite(ageMs) ? Math.max(0, ageMs) : 0
@@ -370,6 +441,21 @@ function recentKeys(usage, now, limit, exclude) {
 
 // ---- State (~/.local/state/omarchy/omacast-state.json)
 
+// Unknown fields are dropped here, so every field the plugin writes has to be
+// listed. Callers change state through updateState(), which keeps the rest.
+function normalizeKeys(raw) {
+  var out = []
+  var seen = ({})
+  var values = Array.isArray(raw) ? raw : []
+  for (var i = 0; i < values.length; i++) {
+    var key = values[i]
+    if (typeof key !== "string" || !USAGE_KEY.test(key) || seen[key]) continue
+    seen[key] = true
+    out.push(key)
+  }
+  return out
+}
+
 function normalizeState(raw) {
   var value = raw && typeof raw === "object" ? raw : ({})
   var usage = ({})
@@ -386,30 +472,63 @@ function normalizeState(raw) {
     usage[key] = { count: count, last: last }
   }
 
-  var pins = []
-  var seen = ({})
-  var rawPins = Array.isArray(value.pins) ? value.pins : []
-  for (var i = 0; i < rawPins.length; i++) {
-    var pin = rawPins[i]
-    if (typeof pin !== "string" || !USAGE_KEY.test(pin) || seen[pin]) continue
-    seen[pin] = true
-    pins.push(pin)
-  }
+  var lastQuery = typeof value.lastQuery === "string" ? clip(value.lastQuery.replace(/[\x00-\x1f]+/g, " "), LAST_QUERY_LIMIT) : ""
 
-  return { version: 1, usage: usage, pins: pins }
+  return { version: 1, usage: usage, pins: normalizeKeys(value.pins), hidden: normalizeKeys(value.hidden), lastQuery: lastQuery }
+}
+
+function updateState(state, patch) {
+  var current = normalizeState(state)
+  var changes = patch || ({})
+  for (var key in changes) current[key] = changes[key]
+  return normalizeState(current)
+}
+
+function toggleKey(list, key) {
+  var out = []
+  var removed = false
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] === key) { removed = true; continue }
+    out.push(list[i])
+  }
+  if (!removed) out.push(key)
+  return out
 }
 
 function togglePin(state, key) {
   var current = normalizeState(state)
   if (!USAGE_KEY.test(String(key || ""))) return current
-  var pins = []
-  var removed = false
-  for (var i = 0; i < current.pins.length; i++) {
-    if (current.pins[i] === key) { removed = true; continue }
-    pins.push(current.pins[i])
-  }
-  if (!removed) pins.push(key)
-  return { version: 1, usage: current.usage, pins: pins }
+  return updateState(current, { pins: toggleKey(current.pins, key) })
+}
+
+// Hiding also unpins: a pinned row that never renders is a pin nobody can
+// remove from the palette.
+function toggleHidden(state, key) {
+  var current = normalizeState(state)
+  if (!USAGE_KEY.test(String(key || ""))) return current
+  var hidden = toggleKey(current.hidden, key)
+  var pins = hidden.indexOf(key) >= 0 ? current.pins.filter(function(pin) { return pin !== key }) : current.pins
+  return updateState(current, { hidden: hidden, pins: pins })
+}
+
+function resetUsage(state, key) {
+  var current = normalizeState(state)
+  var usage = ({})
+  for (var k in current.usage) if (k !== key) usage[k] = current.usage[k]
+  return updateState(current, { usage: usage })
+}
+
+function rememberQuery(state, text) {
+  var value = String(text || "").trim()
+  if (!value) return normalizeState(state)
+  return updateState(state, { lastQuery: value })
+}
+
+function hiddenMap(state) {
+  var out = ({})
+  var list = normalizeState(state).hidden
+  for (var i = 0; i < list.length; i++) out[list[i]] = true
+  return out
 }
 
 // ---- Empty query: what the palette shows before a keystroke
@@ -433,14 +552,18 @@ function emptyQueryRows(catalog, state, now) {
   var current = normalizeState(state)
   var out = []
   var pinned = ({})
+  var hidden = hiddenMap(current)
 
   for (var i = 0; i < current.pins.length; i++) {
     var key = current.pins[i]
     pinned[key] = true
-    if (byKey[key]) out.push(cloneInto(byKey[key], "pinned", i))
+    if (byKey[key] && !hidden[key]) out.push(cloneInto(byKey[key], "pinned", i))
   }
 
-  var recents = recentKeys(current.usage, now, SECTION_CAPS.recent, pinned)
+  var skip = ({})
+  for (var p in pinned) skip[p] = true
+  for (var h in hidden) skip[h] = true
+  var recents = recentKeys(current.usage, now, SECTION_CAPS.recent, skip)
   for (var r = 0; r < recents.length; r++) {
     if (byKey[recents[r]]) out.push(cloneInto(byKey[recents[r]], "recent", r))
   }
@@ -455,7 +578,11 @@ function emptyQueryRows(catalog, state, now) {
 // A pushed scope always wins: once the user is inside Clipboard, typing `f `
 // searches clipboard text for "f", it does not jump to files.
 
-var SCOPES = ["clipboard", "emoji", "files", "windows", "help"]
+var SCOPES = ["clipboard", "emoji", "files", "windows", "help", "kill", "content", "hidden"]
+
+// A lone hex colour is an answer, not a content search: `#f80` and
+// `#ff8800` go to the colour inspector, everything else after `#` to ripgrep.
+var HEX_COLOUR = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i
 
 function parseQuery(text, scope) {
   var raw = String(text === undefined || text === null ? "" : text)
@@ -487,6 +614,11 @@ function parseQuery(text, scope) {
   var wins = lead.match(/^win\s([\s\S]*)$/)
   if (wins) return { raw: raw, trimmed: trimmed, scope: "windows", prefix: "win", rest: wins[1].trim() }
 
+  var kill = lead.match(/^kill\s([\s\S]*)$/)
+  if (kill) return { raw: raw, trimmed: trimmed, scope: "kill", prefix: "kill", rest: kill[1].trim() }
+
+  if (lead.charAt(0) === "#" && !HEX_COLOUR.test(trimmed)) return { raw: raw, trimmed: trimmed, scope: "content", prefix: "#", rest: lead.slice(1).trim() }
+
   if (/^(~|\/|\.\.?\/)/.test(trimmed)) return { raw: raw, trimmed: trimmed, scope: "files", prefix: "path", rest: trimmed }
 
   return { raw: raw, trimmed: trimmed, scope: "root", prefix: "", rest: trimmed }
@@ -514,9 +646,13 @@ function fileRequest(parsed, home) {
 
 // ---- Providers
 
-function appRows(sorted, query, usage, running, now) {
+// A running app focuses by default and launches another instance on the
+// secondary key, the way Raycast and Beacon behave: the common intent behind
+// typing an app's name is "take me there", not "open a second copy".
+function appRows(sorted, query, usage, running, now, hidden) {
   var entries = sorted || []
   var runningMap = running || ({})
+  var skip = hidden || ({})
   var out = []
 
   for (var i = 0; i < entries.length; i++) {
@@ -524,6 +660,7 @@ function appRows(sorted, query, usage, running, now) {
     if (!entry) continue
     var id = String(entry.id || "")
     var key = "app:" + id
+    if (skip[key]) continue
     var live = runningMap[id]
     var isRunning = live !== undefined && live !== null
     out.push(row({
@@ -535,8 +672,8 @@ function appRows(sorted, query, usage, running, now) {
       accessory: isRunning ? ICON_RUNNING : "",
       frecencyKey: key,
       pinnable: true,
-      primaryLabel: "Open",
-      secondaryLabel: isRunning ? "Focus window" : "",
+      primaryLabel: isRunning ? "Focus" : "Open",
+      secondaryLabel: isRunning ? "Launch new" : "",
       score: entries[i].score + frecencyBonus(usage, key, now),
       order: i,
       payload: { kind: "app", desktopId: id, name: String(entry.name || id), icon: String(entry.icon || ""), toplevelIndex: isRunning ? live : -1 }
@@ -643,7 +780,10 @@ function menuRows(menuIndex, query, usage, now, scope) {
       primaryLabel: primary,
       score: score + (entry.isLeaf ? frecencyBonus(usage, key, now) : 0),
       order: entry.order,
-      payload: { kind: "menu", id: entry.id, itemKind: entry.kind, action: entry.action, target: entry.target, iconFont: entry.iconFont }
+      payload: {
+        kind: "menu", id: entry.id, itemKind: entry.kind, action: entry.action, target: entry.target, iconFont: entry.iconFont,
+        preview: { type: "text", text: (entry.breadcrumb ? entry.breadcrumb + " › " : "") + entry.label + (entry.action ? "\n\n" + entry.action : "") }
+      }
     }))
   }
   return out
@@ -694,7 +834,7 @@ function keybindingRows(records, query) {
       primaryLabel: "Run",
       score: score,
       order: i,
-      payload: { kind: "keybinding", dispatcher: record.dispatcher, arg: record.arg, disabled: disabled }
+      payload: { kind: "keybinding", dispatcher: record.dispatcher, arg: record.arg, combo: record.combo, disabled: disabled }
     }))
   }
   return out
@@ -739,7 +879,7 @@ function quicklinkRows(quicklinks, query, usage, now) {
       primaryLabel: completing ? "Type keyword" : "Open",
       score: admission.score + frecencyBonus(usage, key, now),
       order: i,
-      payload: { kind: "quicklink", url: link.url, argument: admission.argument, keyword: link.keyword || "", complete: completing }
+      payload: { kind: "quicklink", url: link.url, argument: admission.argument, keyword: link.keyword || "", complete: completing, preview: { type: "text", text: link.url } }
     }))
   }
   return out
@@ -770,7 +910,7 @@ function snippetRows(snippets, query, usage, now) {
       secondaryLabel: completing ? "" : "Copy",
       score: admission.score + frecencyBonus(usage, key, now),
       order: i,
-      payload: { kind: "snippet", text: snippet.text, argument: admission.argument, keyword: snippet.keyword || "", complete: completing }
+      payload: { kind: "snippet", text: snippet.text, argument: admission.argument, keyword: snippet.keyword || "", complete: completing, preview: { type: "snippet", template: snippet.text, argument: admission.argument } }
     }))
   }
   return out
@@ -801,7 +941,7 @@ function commandRows(commands, query, usage, now) {
       primaryLabel: "Run",
       score: admission.score + frecencyBonus(usage, key, now),
       order: i,
-      payload: { kind: "command", command: command.command, terminal: command.terminal === true, args: args }
+      payload: { kind: "command", command: command.command, terminal: command.terminal === true, args: args, preview: { type: "text", text: command.command + (args.length ? "\n\nArguments: " + args.join("  ") : "") } }
     }))
   }
   return out
@@ -873,7 +1013,7 @@ function clipboardRows(entries, query) {
         primaryLabel: "Paste",
         secondaryLabel: "Copy",
         order: i,
-        payload: { kind: "clipboard", entryType: "image", path: entry.path, mime: entry.mime, historyIndex: entry.historyIndex }
+        payload: { kind: "clipboard", entryType: "image", path: entry.path, mime: entry.mime, historyIndex: entry.historyIndex, preview: { type: "image", path: entry.path } }
       }))
       continue
     }
@@ -896,7 +1036,7 @@ function clipboardRows(entries, query) {
       primaryLabel: "Paste",
       secondaryLabel: "Copy",
       order: i,
-      payload: { kind: "clipboard", entryType: "text", historyIndex: entry.historyIndex }
+      payload: { kind: "clipboard", entryType: "text", historyIndex: entry.historyIndex, preview: { type: "text", text: String(entry.text || "").slice(0, PREVIEW_LIMIT) } }
     }))
   }
   return out
@@ -983,16 +1123,31 @@ function rankFile(path, query) {
   return score
 }
 
+var PREVIEW_LIMIT = 16384
+var IMAGE_FILE = /\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i
+
+// What the preview pane shows for a file row: the image itself, the head of
+// a text file, or ripgrep's context around a content match. Directories get
+// none; there is nothing useful to show in 280 pixels.
+function filePreview(path, isDir, term) {
+  if (isDir) return null
+  if (IMAGE_FILE.test(path)) return { type: "image", path: path }
+  if (term) return { type: "content", path: path, term: term }
+  return { type: "file", path: path }
+}
+
 // fd prints directories with a trailing slash, which would leave the row with
-// an empty basename. Strip it; the glyph stays neutral either way, and gio
-// open handles a file and a directory the same.
-function fileRows(paths, query, home) {
+// an empty basename. Strip it and remember the row is a folder; the preview
+// and Terminal here still check the disk, for paths that arrive without one.
+// `term` is set for content search, whose preview is the match, not the head.
+function fileRows(paths, query, home, term) {
   var values = paths || []
   var out = []
 
   for (var i = 0; i < values.length; i++) {
     var raw = String(values[i] || "")
     if (!raw) continue
+    var isDir = raw.length > 1 && raw.charAt(raw.length - 1) === "/"
     var path = raw.length > 1 ? raw.replace(/\/+$/, "") : raw
     if (!path) path = "/"
 
@@ -1001,37 +1156,62 @@ function fileRows(paths, query, home) {
       section: "files",
       title: basename(path),
       subtitle: shortenHome(dirname(path), home),
-      icon: ICON_FILE,
+      icon: isDir ? ICON_FOLDER : ICON_FILE,
       primaryLabel: "Open",
       secondaryLabel: "Show in folder",
-      score: rankFile(path, query),
+      score: term ? -i : rankFile(path, query),
       order: i,
-      payload: { kind: "file", path: path, dir: dirname(path) }
+      payload: { kind: "file", path: path, dir: dirname(path), isDir: isDir, preview: filePreview(path, isDir, term || "") }
     }))
   }
   return out
 }
 
 // ---- Answers and web fallback
+//
+// `ctx` carries what the answers depend on besides the query: the clock, and
+// the currency state ({ enabled, rates }) when the user opted in.
 
-function answerRows(query) {
+function answerRow(answer, q, order) {
+  return row({
+    key: "answer:" + answer.display,
+    section: "answer",
+    title: answer.display,
+    subtitle: answer.subtitle || q,
+    icon: answer.icon || ICON_CALC,
+    primaryLabel: "Copy",
+    score: 1 - order * 0.01,
+    order: order,
+    payload: { kind: "answer", copyText: answer.copyText, expression: q, swatch: answer.swatch || "" }
+  })
+}
+
+function answerRows(query, ctx) {
   var q = String(query || "").trim()
   if (!q) return []
+  var context = ctx || ({})
+  var now = typeof context.now === "number" ? context.now : Date.now()
+  var currency = context.currency || ({})
   var out = []
 
-  var answer = evaluate(q) || convert(q)
+  var answer = evaluate(q) || convert(q) || (currency.enabled ? convertCurrency(q, currency.rates) : null) || dateAnswer(q, now)
   if (answer) {
+    out.push(answerRow(answer, q, 0))
+  } else if (currency.enabled && !currency.rates && currencyRequest(q)) {
     out.push(row({
-      key: "answer:" + answer.display,
+      key: "answer:rates",
       section: "answer",
-      title: answer.display,
-      subtitle: q,
-      icon: ICON_CALC,
-      primaryLabel: "Copy",
+      title: "Currency rates not fetched yet",
+      subtitle: "Fetches the ECB daily reference rates, once a day",
+      icon: ICON_MONEY,
+      primaryLabel: "Fetch",
       score: 1,
-      payload: { kind: "answer", copyText: answer.copyText }
+      payload: { kind: "fetchRates" }
     }))
   }
+
+  var colours = colourAnswers(q)
+  for (var c = 0; c < colours.length; c++) out.push(answerRow(colours[c], q, c))
 
   var url = detectUrl(q)
   if (url) {
@@ -1051,25 +1231,43 @@ function answerRows(query) {
 
 // The config file does not exist until someone wants it, so the palette
 // carries the way in: this row opens it in the editor, creating it from the
-// shipped example on first use.
-function configRows(query, path) {
+// shipped example on first use. The scripts folder gets the same treatment.
+function configRows(query, path, scriptDir) {
+  var out = []
   var score = matchScore(query, {
     name: "OmaCast Config",
     aliases: ["settings", "preferences", "quicklinks", "snippets", "commands", "omacast"],
     text: String(path || "")
   })
-  if (score < 0) return []
+  if (score >= 0) {
+    out.push(row({
+      key: "cfg:config",
+      section: "actions",
+      title: "OmaCast Config",
+      subtitle: String(path || ""),
+      icon: ICON_SETTINGS,
+      primaryLabel: "Edit",
+      score: score,
+      payload: { kind: "config" }
+    }))
+  }
 
-  return [row({
-    key: "cfg:config",
-    section: "actions",
-    title: "OmaCast Config",
-    subtitle: String(path || ""),
-    icon: ICON_SETTINGS,
-    primaryLabel: "Edit",
-    score: score,
-    payload: { kind: "config" }
-  })]
+  if (scriptDir) {
+    var scriptScore = matchScore(query, { name: "OmaCast Scripts Folder", aliases: ["script commands", "raycast scripts", "omacast"], text: String(scriptDir) })
+    if (scriptScore >= 0) {
+      out.push(row({
+        key: "cfg:scripts",
+        section: "actions",
+        title: "OmaCast Scripts Folder",
+        subtitle: String(scriptDir),
+        icon: ICON_FOLDER,
+        primaryLabel: "Open",
+        score: scriptScore,
+        payload: { kind: "scriptsFolder", path: String(scriptDir) }
+      }))
+    }
+  }
+  return out
 }
 
 function webRows(query, engine) {
@@ -1092,7 +1290,9 @@ var SCOPE_ROWS = [
   { scope: "clipboard", name: "Clipboard History", icon: ICON_CLIPBOARD },
   { scope: "emoji", name: "Emoji", icon: ICON_EMOJI },
   { scope: "files", name: "Search Files", icon: ICON_SEARCH },
+  { scope: "content", name: "Search File Contents", icon: ICON_SEARCH },
   { scope: "windows", name: "Windows", icon: ICON_WINDOW },
+  { scope: "kill", name: "Kill Process", icon: ICON_PROCESS },
   { scope: "help", name: "Keywords & Prefixes", icon: ICON_SEARCH }
 ]
 
@@ -1107,12 +1307,18 @@ var HELP_PREFIXES = [
   { token: ":", detail: "Emoji search, as in  :smile", icon: ICON_EMOJI },
   { token: "cb ", detail: "Clipboard history, as in  cb ssh", icon: ICON_CLIPBOARD },
   { token: "f ", detail: "Find files in your home, as in  f invoice", icon: ICON_FILE },
+  { token: "#", detail: "Search inside files, as in  #TODO", icon: ICON_SEARCH },
   { token: "win ", detail: "Open windows, as in  win chrome", icon: ICON_WINDOW },
+  { token: "kill ", detail: "Terminate one of your processes, as in  kill firefox", icon: ICON_PROCESS },
+  { token: "remind ", detail: "Set a reminder, as in  remind 30 check the oven", icon: ICON_BELL },
   { token: "~/", detail: "Browse a path, as in  ~/coding/", icon: ICON_FILE }
 ]
 
-function helpRows(config, query) {
+// `extra` is what the config alone cannot say: loaded script commands, the
+// scripts folder, and how many rows the user has hidden.
+function helpRows(config, query, extra) {
   var settings = config || ({})
+  var more = extra || ({})
   var out = []
   var specs = []
 
@@ -1123,7 +1329,8 @@ function helpRows(config, query) {
   var groups = [
     { values: settings.quicklinks || [], detail: "Quicklink", icon: ICON_QUICKLINK },
     { values: settings.snippets || [], detail: "Snippet", icon: ICON_SNIPPET },
-    { values: settings.commands || [], detail: "Command", icon: ICON_COMMAND }
+    { values: settings.commands || [], detail: "Command", icon: ICON_COMMAND },
+    { values: scriptKeywordEntries(more.scripts), detail: "Script", icon: ICON_CODE }
   ]
 
   for (var g = 0; g < groups.length; g++) {
@@ -1149,6 +1356,35 @@ function helpRows(config, query) {
       score: score,
       order: s,
       payload: { kind: "help", insert: spec.token }
+    }))
+  }
+
+  if (more.scriptDir && matchScore(query, { name: "Scripts folder", aliases: ["script commands"], text: more.scriptDir }) >= 0) {
+    out.push(row({
+      key: "help:scripts-folder",
+      section: "help",
+      title: "Scripts folder",
+      subtitle: more.scriptDir,
+      icon: ICON_FOLDER,
+      accessory: "Folder",
+      primaryLabel: "Open",
+      order: specs.length,
+      payload: { kind: "scriptsFolder", path: more.scriptDir }
+    }))
+  }
+
+  var hiddenCount = more.hiddenCount || 0
+  if (hiddenCount > 0 && matchScore(query, { name: "Show hidden", aliases: ["hidden", "unhide"] }) >= 0) {
+    out.push(row({
+      key: "help:hidden",
+      section: "help",
+      title: "Show hidden",
+      subtitle: hiddenCount === 1 ? "1 hidden row" : hiddenCount + " hidden rows",
+      icon: ICON_EYE,
+      accessory: "Scope",
+      primaryLabel: "Browse",
+      order: specs.length + 1,
+      payload: { kind: "scope", scope: "hidden" }
     }))
   }
   return out
@@ -1179,6 +1415,7 @@ function scopeRows(query) {
 }
 
 function scopeTitle(scope) {
+  if (scope === "hidden") return "Hidden"
   for (var i = 0; i < SCOPE_ROWS.length; i++) {
     if (SCOPE_ROWS[i].scope === scope) return SCOPE_ROWS[i].name
   }
@@ -1189,10 +1426,991 @@ function scopePlaceholder(scope) {
   if (scope === "clipboard") return "Search clipboard history…"
   if (scope === "emoji") return "Search emoji…"
   if (scope === "files") return "Search files in your home…"
+  if (scope === "content") return "Search inside files in your home…"
   if (scope === "windows") return "Search open windows…"
+  if (scope === "kill") return "Search your processes…"
+  if (scope === "hidden") return "Search hidden rows…"
   if (scope === "help") return "Search prefixes and keywords…"
   if (String(scope || "").indexOf("menu:") === 0) return "Search this menu…"
   return "Search apps, windows, actions…  ? for keywords"
+}
+
+// Rows the user hid, resolved against the unfiltered catalog. A key whose
+// row is gone (an uninstalled app) still shows, so it can be unhidden.
+function hiddenRows(byKey, state, query) {
+  var list = normalizeState(state).hidden
+  var catalog = byKey || ({})
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var key = list[i]
+    var source = catalog[key]
+    var title = source ? source.title : key
+    if (matchScore(query, { name: title, aliases: [key] }) < 0 && String(query || "").trim()) continue
+    out.push(row({
+      key: "hidden:" + key,
+      section: "hidden",
+      title: title,
+      subtitle: source ? source.subtitle : "No longer installed",
+      icon: source ? source.icon : ICON_EYE,
+      primaryLabel: "Unhide",
+      order: i,
+      payload: { kind: "unhide", key: key, target: source ? source.payload : null }
+    }))
+  }
+  return out
+}
+
+// ---- Dates and times
+//
+// Everything local is plain synchronous Date. Converting between zones goes
+// through `date`, because Quickshell's JS engine has no Intl and
+// toLocaleString ignores `timeZone`: timeZoneRequest() describes the question,
+// Sources.qml asks `date`, timeZoneRows() renders the answer.
+
+var DAY_MS = 86400000
+var MONTH_NAMES = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+var DAY_NAMES = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+
+function startOfDay(ms) {
+  var d = new Date(ms)
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate())
+}
+
+function titleCase(text) {
+  return String(text || "").replace(/(^|[\s_\/-])([a-z])/g, function(all, lead, ch) { return lead + ch.toUpperCase() })
+}
+
+function shortMonth(index) {
+  return titleCase(MONTH_NAMES[index].slice(0, 3))
+}
+
+function formatDay(date) {
+  return WEEKDAYS[date.getDay()].slice(0, 3) + " " + date.getDate() + " " + shortMonth(date.getMonth()) + " " + date.getFullYear()
+}
+
+function monthIndex(token) {
+  var t = lower(token).replace(/\.$/, "")
+  if (t.length < 3) return -1
+  for (var i = 0; i < MONTH_NAMES.length; i++) if (MONTH_NAMES[i].indexOf(t) === 0) return i
+  return -1
+}
+
+function weekdayIndex(token) {
+  return DAY_NAMES.indexOf(lower(token))
+}
+
+function makeDate(year, month, day) {
+  var d = new Date(year, month, day)
+  return d.getMonth() === month && d.getDate() === day ? d : null
+}
+
+function nextWeekday(today, target) {
+  var ahead = (target - today.getDay() + 7) % 7
+  if (ahead === 0) ahead = 7
+  return new Date(today.getFullYear(), today.getMonth(), today.getDate() + ahead)
+}
+
+// `rollForward` is for questions about the future: `days until dec 25` asked
+// on December 26th means next year's.
+function parseDay(text, now, rollForward) {
+  var t = lower(text).trim().replace(/\s+/g, " ")
+  var today = startOfDay(now)
+  if (t === "today" || t === "now") return today
+  if (t === "tomorrow") return new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1)
+  if (t === "yesterday") return new Date(today.getFullYear(), today.getMonth(), today.getDate() - 1)
+
+  var m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+  if (m) return makeDate(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+
+  var month = -1
+  var day = -1
+  var year = -1
+  m = t.match(/^([a-z]+\.?) (\d{1,2})(?:st|nd|rd|th)?(?:,? (\d{4}))?$/)
+  if (m && monthIndex(m[1]) >= 0) {
+    month = monthIndex(m[1]); day = Number(m[2]); year = m[3] ? Number(m[3]) : -1
+  } else {
+    m = t.match(/^(\d{1,2})(?:st|nd|rd|th)? ([a-z]+\.?)(?:,? (\d{4}))?$/)
+    if (m && monthIndex(m[2]) >= 0) { month = monthIndex(m[2]); day = Number(m[1]); year = m[3] ? Number(m[3]) : -1 }
+  }
+  if (month >= 0) {
+    var date = makeDate(year >= 0 ? year : today.getFullYear(), month, day)
+    if (date && year < 0 && rollForward && date < today) date = makeDate(today.getFullYear() + 1, month, day)
+    return date
+  }
+
+  m = t.match(/^(?:next )?([a-z]+)$/)
+  if (m && weekdayIndex(m[1]) >= 0) return nextWeekday(today, weekdayIndex(m[1]))
+  return null
+}
+
+function periodUnit(token) {
+  var t = lower(token)
+  if (/^(d|days?)$/.test(t)) return "d"
+  if (/^(w|wks?|weeks?)$/.test(t)) return "w"
+  if (/^(mo|mos|months?)$/.test(t)) return "m"
+  if (/^(y|yrs?|years?)$/.test(t)) return "y"
+  return ""
+}
+
+// Months and years clamp to the end of the month: Jan 31 + 1 month is Feb
+// 28 (or 29), never March 3rd.
+function addPeriod(date, amount, unit) {
+  var y = date.getFullYear()
+  var mo = date.getMonth()
+  var d = date.getDate()
+  if (unit === "d") return new Date(y, mo, d + amount)
+  if (unit === "w") return new Date(y, mo, d + amount * 7)
+  var target = new Date(y, mo + (unit === "y" ? amount * 12 : amount), 1)
+  var last = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate()
+  return new Date(target.getFullYear(), target.getMonth(), Math.min(d, last))
+}
+
+function dayCount(days) {
+  return Math.abs(days) === 1 ? days + " day" : days + " days"
+}
+
+function dateAnswer(input, now) {
+  var s = lower(input).trim().replace(/\s+/g, " ")
+  if (!s) return null
+
+  if (s === "now" || s === "unix time" || s === "timestamp") {
+    var seconds = String(Math.floor(now / 1000))
+    return { display: seconds, copyText: seconds, subtitle: "Unix time", icon: ICON_CLOCK }
+  }
+
+  if (/^(\d{10}|\d{13})$/.test(s)) {
+    var stamp = new Date(s.length === 10 ? Number(s) * 1000 : Number(s))
+    var local = formatDate(stamp, "yyyy-MM-dd HH:mm:ss")
+    return { display: WEEKDAYS[stamp.getDay()].slice(0, 3) + " " + local, copyText: local, subtitle: "Unix time " + s + ", in your time zone", icon: ICON_CLOCK }
+  }
+
+  var m = s.match(/^(?:how many )?days? (until|till|til|to|since|from) (.+?)\??$/)
+  if (m) {
+    var future = m[1] !== "since" && m[1] !== "from"
+    var target = parseDay(m[2], now, future)
+    if (!target) return null
+    var diff = Math.round((target - startOfDay(now)) / DAY_MS)
+    var count = future ? diff : -diff
+    return { display: dayCount(count) + (future ? " until " : " since ") + formatDay(target), copyText: String(count), icon: ICON_CLOCK }
+  }
+
+  m = s.match(/^(.+?) ?([+-]) ?(\d{1,5}) ?([a-z]+)$/)
+  if (m && periodUnit(m[4])) {
+    var base = parseDay(m[1], now, false)
+    if (base) {
+      var result = addPeriod(base, (m[2] === "-" ? -1 : 1) * Number(m[3]), periodUnit(m[4]))
+      return { display: formatDay(result), copyText: formatDate(result, "yyyy-MM-dd"), icon: ICON_CLOCK }
+    }
+  }
+
+  m = s.match(/^(?:next )?([a-z]+)$/)
+  if (m && weekdayIndex(m[1]) >= 0) {
+    var next = nextWeekday(startOfDay(now), weekdayIndex(m[1]))
+    return { display: formatDay(next), copyText: formatDate(next, "yyyy-MM-dd"), subtitle: "Next " + titleCase(m[1]), icon: ICON_CLOCK }
+  }
+  return null
+}
+
+// City and abbreviation → IANA zone. Abbreviations mean the region, not the
+// literal offset: `pst` in July is what people say for Los Angeles time, and
+// `date` prints PDT for it.
+var ZONE_ABBREVIATIONS = {
+  utc: "UTC", gmt: "UTC",
+  pst: "America/Los_Angeles", pdt: "America/Los_Angeles", mst: "America/Denver", mdt: "America/Denver",
+  cst: "America/Chicago", cdt: "America/Chicago", est: "America/New_York", edt: "America/New_York",
+  akst: "America/Anchorage", hst: "Pacific/Honolulu",
+  bst: "Europe/London", wet: "Europe/Lisbon", cet: "Europe/Paris", cest: "Europe/Paris",
+  eet: "Europe/Athens", eest: "Europe/Athens", msk: "Europe/Moscow",
+  ist: "Asia/Kolkata", pkt: "Asia/Karachi", ict: "Asia/Bangkok", wib: "Asia/Jakarta", sgt: "Asia/Singapore",
+  hkt: "Asia/Hong_Kong", jst: "Asia/Tokyo", kst: "Asia/Seoul", gst: "Asia/Dubai",
+  aest: "Australia/Sydney", aedt: "Australia/Sydney", acst: "Australia/Adelaide", awst: "Australia/Perth",
+  nzst: "Pacific/Auckland", nzdt: "Pacific/Auckland", brt: "America/Sao_Paulo", art: "America/Argentina/Buenos_Aires",
+  sast: "Africa/Johannesburg", eat: "Africa/Nairobi", wat: "Africa/Lagos"
+}
+
+var ZONE_CITIES = {
+  london: "Europe/London", manchester: "Europe/London", edinburgh: "Europe/London", dublin: "Europe/Dublin",
+  lisbon: "Europe/Lisbon", madrid: "Europe/Madrid", barcelona: "Europe/Madrid", paris: "Europe/Paris",
+  brussels: "Europe/Brussels", amsterdam: "Europe/Amsterdam", berlin: "Europe/Berlin", munich: "Europe/Berlin",
+  frankfurt: "Europe/Berlin", hamburg: "Europe/Berlin", zurich: "Europe/Zurich", geneva: "Europe/Zurich",
+  vienna: "Europe/Vienna", rome: "Europe/Rome", milan: "Europe/Rome", prague: "Europe/Prague",
+  warsaw: "Europe/Warsaw", budapest: "Europe/Budapest", stockholm: "Europe/Stockholm", oslo: "Europe/Oslo",
+  copenhagen: "Europe/Copenhagen", helsinki: "Europe/Helsinki", athens: "Europe/Athens", bucharest: "Europe/Bucharest",
+  istanbul: "Europe/Istanbul", kyiv: "Europe/Kyiv", kiev: "Europe/Kyiv", moscow: "Europe/Moscow",
+  reykjavik: "Atlantic/Reykjavik", cairo: "Africa/Cairo", lagos: "Africa/Lagos", nairobi: "Africa/Nairobi",
+  johannesburg: "Africa/Johannesburg", "cape town": "Africa/Johannesburg", casablanca: "Africa/Casablanca",
+  dubai: "Asia/Dubai", "abu dhabi": "Asia/Dubai", riyadh: "Asia/Riyadh", doha: "Asia/Qatar",
+  "tel aviv": "Asia/Jerusalem", jerusalem: "Asia/Jerusalem", tehran: "Asia/Tehran", karachi: "Asia/Karachi",
+  delhi: "Asia/Kolkata", "new delhi": "Asia/Kolkata", mumbai: "Asia/Kolkata", bangalore: "Asia/Kolkata",
+  bengaluru: "Asia/Kolkata", kolkata: "Asia/Kolkata", chennai: "Asia/Kolkata", hyderabad: "Asia/Kolkata",
+  dhaka: "Asia/Dhaka", kathmandu: "Asia/Kathmandu", bangkok: "Asia/Bangkok", hanoi: "Asia/Bangkok",
+  jakarta: "Asia/Jakarta", singapore: "Asia/Singapore", "kuala lumpur": "Asia/Kuala_Lumpur", manila: "Asia/Manila",
+  "hong kong": "Asia/Hong_Kong", shanghai: "Asia/Shanghai", beijing: "Asia/Shanghai", shenzhen: "Asia/Shanghai",
+  taipei: "Asia/Taipei", seoul: "Asia/Seoul", tokyo: "Asia/Tokyo", osaka: "Asia/Tokyo",
+  sydney: "Australia/Sydney", melbourne: "Australia/Melbourne", brisbane: "Australia/Brisbane", perth: "Australia/Perth",
+  adelaide: "Australia/Adelaide", auckland: "Pacific/Auckland", wellington: "Pacific/Auckland", honolulu: "Pacific/Honolulu",
+  anchorage: "America/Anchorage", "los angeles": "America/Los_Angeles", la: "America/Los_Angeles",
+  "san francisco": "America/Los_Angeles", sf: "America/Los_Angeles", seattle: "America/Los_Angeles",
+  vancouver: "America/Vancouver", denver: "America/Denver", phoenix: "America/Phoenix", chicago: "America/Chicago",
+  dallas: "America/Chicago", houston: "America/Chicago", austin: "America/Chicago", toronto: "America/Toronto",
+  montreal: "America/Toronto", "new york": "America/New_York", nyc: "America/New_York", boston: "America/New_York",
+  washington: "America/New_York", miami: "America/New_York", atlanta: "America/New_York",
+  "mexico city": "America/Mexico_City", bogota: "America/Bogota", lima: "America/Lima", santiago: "America/Santiago",
+  "buenos aires": "America/Argentina/Buenos_Aires", "sao paulo": "America/Sao_Paulo", "rio de janeiro": "America/Sao_Paulo"
+}
+
+var IANA_ZONE = /^[a-z]+(?:\/[a-z_-]+){1,2}$/
+
+// Returns { zone, label } or null. A typed IANA name is re-cased, since the
+// query was lowercased before it got here.
+function resolveZone(token) {
+  var t = lower(token).trim().replace(/\s+/g, " ")
+  if (!t) return null
+  if (ZONE_ABBREVIATIONS[t]) return { zone: ZONE_ABBREVIATIONS[t], label: t.toUpperCase() }
+  if (ZONE_CITIES[t]) return { zone: ZONE_CITIES[t], label: t.length <= 3 ? t.toUpperCase() : titleCase(t) }
+  if (IANA_ZONE.test(t)) {
+    var zone = titleCase(t)
+    return { zone: zone, label: zone }
+  }
+  return null
+}
+
+// `3pm`, `3:30 pm`, `15:30`, `noon`. A bare `3` is a number, not a time.
+function parseClock(text) {
+  var t = lower(text).trim()
+  if (t === "noon" || t === "midday") return { h: 12, m: 0 }
+  if (t === "midnight") return { h: 0, m: 0 }
+  var m = t.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?$/)
+  if (!m) return null
+  var h = Number(m[1])
+  var min = m[2] ? Number(m[2]) : 0
+  var suffix = m[3] ? m[3].charAt(0) : ""
+  if (!suffix && !m[2]) return null
+  if (min > 59) return null
+  if (suffix) {
+    if (h < 1 || h > 12) return null
+    if (suffix === "p" && h < 12) h += 12
+    if (suffix === "a" && h === 12) h = 0
+  } else if (h > 23) {
+    return null
+  }
+  return { h: h, m: min }
+}
+
+function zoneList(text) {
+  var parts = String(text || "").split(/\s*,\s*|\s+and\s+/)
+  var zones = []
+  var labels = []
+  for (var i = 0; i < parts.length; i++) {
+    var resolved = resolveZone(parts[i])
+    if (!resolved) return null
+    zones.push(resolved.zone)
+    labels.push(resolved.label)
+  }
+  return zones.length ? { zones: zones, labels: labels } : null
+}
+
+// `3pm ist` splits into a clock and a source zone at whichever space works.
+function clockAndZone(text) {
+  var clock = parseClock(text)
+  if (clock) return { clock: clock, source: null }
+  var words = text.split(" ")
+  for (var i = words.length - 1; i >= 1; i--) {
+    var c = parseClock(words.slice(0, i).join(" "))
+    if (!c) continue
+    var zone = resolveZone(words.slice(i).join(" "))
+    return zone ? { clock: c, source: zone } : null
+  }
+  return null
+}
+
+// Describes a time zone question for Sources.qml, or returns null. `epoch`
+// is set when the instant is known here (now, or a local wall time);
+// otherwise `source` + `wall` ask `date` to place a wall time in a zone.
+function timeZoneRequest(query, now) {
+  var q = lower(query).trim().replace(/\s+/g, " ")
+  if (!q) return null
+
+  var targets = null
+  var parts = null
+  var m = q.match(/^(?:now|time|current time|what time is it|what's the time)\s+(?:in|at)\s+(.+?)\??$/)
+  if (m) {
+    targets = zoneList(m[1])
+  } else if ((m = q.match(/^(.+?) time\??$/))) {
+    targets = zoneList(m[1])
+  } else if ((m = q.match(/^(.+?) (?:in|to|as) (.+?)\??$/))) {
+    parts = clockAndZone(m[1])
+    if (!parts) return null
+    targets = zoneList(m[2])
+  }
+  if (!targets) return null
+
+  var request = { key: q, zones: targets.zones, labels: targets.labels, epoch: -1, source: "", sourceLabel: "", wall: "", clock: "" }
+  if (!parts) {
+    request.epoch = Math.floor(now / 1000)
+    return request
+  }
+
+  var today = new Date(now)
+  request.clock = pad(parts.clock.h, 2) + ":" + pad(parts.clock.m, 2)
+  if (!parts.source) {
+    request.epoch = Math.floor(new Date(today.getFullYear(), today.getMonth(), today.getDate(), parts.clock.h, parts.clock.m).getTime() / 1000)
+  } else {
+    request.source = parts.source.zone
+    request.sourceLabel = parts.source.label
+    request.wall = formatDate(today, "yyyy-MM-dd") + " " + request.clock
+  }
+  return request
+}
+
+// argv for the one `date` batch that answers a request.
+function timeZoneCommand(request) {
+  var script = 'e=$1; src=$2; wall=$3; shift 3; if [ -n "$src" ]; then e=$(TZ=$src date -d "$wall" +%s) || exit 1; fi; for z in "$@"; do TZ=$z date -d "@$e" "+%Y-%m-%d %H:%M %Z"; done'
+  return ["bash", "-c", script, "bash", String(request.epoch), request.source, request.wall].concat(request.zones)
+}
+
+function timeZoneRows(request, output) {
+  if (!request) return []
+  var lines = String(output || "").split("\n")
+  var out = []
+  for (var i = 0; i < request.zones.length; i++) {
+    var m = String(lines[i] || "").match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}:\d{2}) (\S+)$/)
+    if (!m) continue
+    var day = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+    var time = m[4] + " " + m[5]
+    var from = request.source ? " · from " + request.clock + " " + request.sourceLabel : (request.clock ? " · from " + request.clock + " here" : "")
+    out.push(row({
+      key: "tz:" + request.zones[i],
+      section: "answer",
+      title: time + "  ·  " + WEEKDAYS[day.getDay()].slice(0, 3) + " " + day.getDate() + " " + shortMonth(day.getMonth()),
+      subtitle: request.labels[i] + from,
+      icon: ICON_CLOCK,
+      primaryLabel: "Copy",
+      score: 1.5,
+      order: i,
+      payload: { kind: "answer", copyText: time, expression: request.key }
+    }))
+  }
+  return out
+}
+
+// ---- Colours
+
+function clampByte(value) {
+  return Math.max(0, Math.min(255, Math.round(value)))
+}
+
+function hslToRgb(h, s, l) {
+  var hue = ((h % 360) + 360) % 360 / 360
+  var sat = s / 100
+  var light = l / 100
+  if (sat === 0) return { r: clampByte(light * 255), g: clampByte(light * 255), b: clampByte(light * 255) }
+  var q = light < 0.5 ? light * (1 + sat) : light + sat - light * sat
+  var p = 2 * light - q
+  function channel(t) {
+    var v = t < 0 ? t + 1 : (t > 1 ? t - 1 : t)
+    if (v < 1 / 6) return p + (q - p) * 6 * v
+    if (v < 1 / 2) return q
+    if (v < 2 / 3) return p + (q - p) * (2 / 3 - v) * 6
+    return p
+  }
+  return { r: clampByte(channel(hue + 1 / 3) * 255), g: clampByte(channel(hue) * 255), b: clampByte(channel(hue - 1 / 3) * 255) }
+}
+
+function rgbToHsl(r, g, b) {
+  var rn = r / 255
+  var gn = g / 255
+  var bn = b / 255
+  var max = Math.max(rn, gn, bn)
+  var min = Math.min(rn, gn, bn)
+  var l = (max + min) / 2
+  var h = 0
+  var s = 0
+  if (max !== min) {
+    var d = max - min
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min)
+    if (max === rn) h = (gn - bn) / d + (gn < bn ? 6 : 0)
+    else if (max === gn) h = (bn - rn) / d + 2
+    else h = (rn - gn) / d + 4
+    h *= 60
+  }
+  return { h: Math.round(h) % 360, s: Math.round(s * 100), l: Math.round(l * 100) }
+}
+
+function parseColour(input) {
+  var s = lower(input).trim()
+  var m = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/)
+  if (m) {
+    var hex = m[1].length === 3 ? m[1].replace(/(.)/g, "$1$1") : m[1]
+    return { r: parseInt(hex.slice(0, 2), 16), g: parseInt(hex.slice(2, 4), 16), b: parseInt(hex.slice(4, 6), 16) }
+  }
+  m = s.match(/^rgba?\(\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*(?:[,\/]\s*[\d.]+%?\s*)?\)$/)
+  if (m) {
+    var r = Number(m[1]), g = Number(m[2]), b = Number(m[3])
+    if (r > 255 || g > 255 || b > 255) return null
+    return { r: r, g: g, b: b }
+  }
+  m = s.match(/^hsla?\(\s*(\d{1,3}(?:\.\d+)?)(?:deg)?\s*[,\s]\s*(\d{1,3}(?:\.\d+)?)%\s*[,\s]\s*(\d{1,3}(?:\.\d+)?)%\s*(?:[,\/]\s*[\d.]+%?\s*)?\)$/)
+  if (m) {
+    if (Number(m[2]) > 100 || Number(m[3]) > 100) return null
+    return hslToRgb(Number(m[1]), Number(m[2]), Number(m[3]))
+  }
+  return null
+}
+
+// Three answers for one colour, each carrying the swatch the row draws.
+function colourAnswers(input) {
+  var c = parseColour(input)
+  if (!c) return []
+  var hex = "#" + pad(c.r.toString(16), 2) + pad(c.g.toString(16), 2) + pad(c.b.toString(16), 2)
+  var hsl = rgbToHsl(c.r, c.g, c.b)
+  var values = [
+    { display: hex, subtitle: "HEX" },
+    { display: "rgb(" + c.r + ", " + c.g + ", " + c.b + ")", subtitle: "RGB" },
+    { display: "hsl(" + hsl.h + ", " + hsl.s + "%, " + hsl.l + "%)", subtitle: "HSL" }
+  ]
+  for (var i = 0; i < values.length; i++) {
+    values[i].copyText = values[i].display
+    values[i].swatch = hex
+    values[i].icon = ICON_BRUSH
+  }
+  return values
+}
+
+// ---- Reminders (omarchy reminder <minutes> "<text>")
+
+function durationLabel(minutes) {
+  if (minutes < 60) return minutes + " min"
+  var h = Math.floor(minutes / 60)
+  var m = minutes % 60
+  return h + " h" + (m ? " " + m + " min" : "")
+}
+
+function reminderRows(query, now) {
+  var q = String(query || "").trim().replace(/\s+/g, " ")
+  var m = q.match(/^remind(?: me)?(?: ([\s\S]*))?$/i)
+  if (!m) return []
+  var rest = String(m[1] || "").trim()
+  var minutes = 0
+  var text = ""
+  var when = ""
+
+  var abs = rest.match(/^at (\d{1,2})(?::(\d{2}))? ?(am|pm)?(?: (?:to )?([\s\S]*))?$/i)
+  var rel = rest.match(/^(?:in )?(\d{1,4}) ?(m|mins?|minutes?|h|hrs?|hours?)?(?: (?:to )?([\s\S]*))?$/i)
+  if (abs) {
+    var clock = parseClock(abs[1] + (abs[2] ? ":" + abs[2] : "") + (abs[3] || (abs[2] ? "" : ":00")))
+    if (clock) {
+      var base = new Date(now)
+      var target = new Date(base.getFullYear(), base.getMonth(), base.getDate(), clock.h, clock.m)
+      if (target.getTime() <= now) target = new Date(base.getFullYear(), base.getMonth(), base.getDate() + 1, clock.h, clock.m)
+      minutes = Math.max(1, Math.ceil((target.getTime() - now) / 60000))
+      when = "at " + pad(clock.h, 2) + ":" + pad(clock.m, 2) + " (in " + durationLabel(minutes) + ")"
+      text = String(abs[4] || "").trim()
+    }
+  } else if (rel) {
+    var amount = Number(rel[1])
+    minutes = /^h/i.test(rel[2] || "") ? amount * 60 : amount
+    when = "in " + durationLabel(minutes)
+    text = String(rel[3] || "").trim()
+  }
+
+  if (minutes < 1) {
+    var pending = rest.replace(/^to /i, "")
+    return [row({
+      key: "remind:pending",
+      section: "answer",
+      title: pending ? "Remind: " + pending : "Remind me…",
+      subtitle: "needs a time, as in  remind 30 check the oven",
+      icon: ICON_BELL,
+      primaryLabel: "Needs a time",
+      score: 1,
+      payload: { kind: "reminder", disabled: true }
+    })]
+  }
+
+  return [row({
+    key: "remind:" + minutes + ":" + text,
+    section: "answer",
+    title: "Remind " + when + (text ? ": " + text : ""),
+    subtitle: "omarchy reminder",
+    icon: ICON_BELL,
+    primaryLabel: "Set reminder",
+    score: 3,
+    payload: { kind: "reminder", minutes: minutes, text: text, disabled: false }
+  })]
+}
+
+// ---- Processes (the `kill ` scope)
+//
+// Sources.qml prints the shell's own pid, its parent and its own helper pid
+// on the first line, then `ps -o pid=,pcpu=,pmem=,comm=`. Those pids are the
+// ones a slip of the Enter key must never reach.
+function parseProcesses(text) {
+  var lines = String(text || "").split("\n")
+  var skip = ({})
+  var first = String(lines[0] || "").trim().split(/\s+/)
+  for (var s = 0; s < first.length; s++) if (first[s]) skip[first[s]] = true
+
+  var out = []
+  for (var i = 1; i < lines.length; i++) {
+    var m = lines[i].match(/^\s*(\d+)\s+([\d.]+)\s+([\d.]+)\s+(.+?)\s*$/)
+    if (!m || skip[m[1]]) continue
+    out.push({ pid: m[1], cpu: Number(m[2]), mem: Number(m[3]), comm: m[4] })
+  }
+  return out
+}
+
+function processRows(processes, query) {
+  var values = processes || []
+  var terms = lower(query).trim() ? lower(query).trim().split(/\s+/) : []
+  var out = []
+  for (var i = 0; i < values.length; i++) {
+    var proc = values[i]
+    var haystack = lower(proc.comm) + " " + proc.pid
+    var matched = true
+    for (var t = 0; t < terms.length; t++) {
+      if (haystack.indexOf(terms[t]) < 0) { matched = false; break }
+    }
+    if (!matched) continue
+    out.push(row({
+      key: "proc:" + proc.pid,
+      section: "processes",
+      title: proc.comm,
+      subtitle: proc.pid + " · " + proc.cpu.toFixed(1) + "% cpu · " + proc.mem.toFixed(1) + "% mem",
+      icon: ICON_PROCESS,
+      confirm: true,
+      primaryLabel: "Terminate",
+      secondaryLabel: "Kill",
+      order: i,
+      payload: { kind: "process", pid: proc.pid, comm: proc.comm }
+    }))
+  }
+  return out
+}
+
+// ---- `omarchy commands --json`
+//
+// Only commands that take no arguments and no sudo can run from a row. A
+// command the menu already runs is dropped, so Lock appears once.
+var CATALOG_CONFIRM = /\b(remove|reinstall|refresh|reboot|shutdown|logout|close all|restart shell)\b/
+
+function parseCommandCatalog(text) {
+  var parsed = parseJson(text)
+  var list = parsed && Array.isArray(parsed.commands) ? parsed.commands : []
+  var out = []
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i]
+    if (!c || c.args !== "" || c.requires_sudo !== false || c.hidden === true) continue
+    if (typeof c.route !== "string" || c.route.indexOf("omarchy ") !== 0) continue
+    out.push({ route: c.route, binary: String(c.binary || ""), summary: String(c.summary || c.route) })
+  }
+  return out
+}
+
+function buildCommandCatalog(commands, menuIndex) {
+  var actions = ({})
+  var index = menuIndex || []
+  for (var m = 0; m < index.length; m++) if (index[m].action) actions[String(index[m].action).trim()] = true
+
+  var values = commands || []
+  var out = []
+  for (var i = 0; i < values.length; i++) {
+    var c = values[i]
+    if (actions[c.route] || (c.binary && actions[c.binary])) continue
+    var short = c.route.slice("omarchy ".length)
+    out.push({
+      route: c.route,
+      summary: c.summary,
+      // The route is the name; the summary is prose and only matches as a
+      // substring, or scattered letters would admit every long summary.
+      fields: prepareFields(short, [c.route], c.summary),
+      confirm: CATALOG_CONFIRM.test(short)
+    })
+  }
+  return out
+}
+
+function commandCatalogRows(catalog, query, usage, now, all) {
+  var values = catalog || []
+  var q = String(query || "").trim()
+  if (!q && !all) return []
+  var out = []
+  for (var i = 0; i < values.length; i++) {
+    var c = values[i]
+    var score = all ? 0 : matchScore(q, c.fields)
+    if (score < 0) continue
+    var key = "oc:" + c.route
+    out.push(row({
+      key: key,
+      section: "actions",
+      title: firstLine(c.summary).replace(/\.$/, ""),
+      subtitle: c.route,
+      icon: ICON_COMMAND,
+      frecencyKey: key,
+      pinnable: true,
+      confirm: c.confirm,
+      primaryLabel: "Run",
+      score: score + frecencyBonus(usage, key, now),
+      order: i,
+      payload: { kind: "omarchyCommand", route: c.route, preview: { type: "text", text: c.route + "\n\n" + c.summary } }
+    }))
+  }
+  return out
+}
+
+// ---- Themes (`omarchy theme current`, a `---` line, `omarchy theme list`)
+
+function parseThemes(text) {
+  var lines = String(text || "").split("\n")
+  var cut = lines.indexOf("---")
+  var current = cut > 0 ? lines[0].trim() : ""
+  var names = []
+  for (var i = cut + 1; i < lines.length; i++) {
+    var name = lines[i].trim()
+    if (name) names.push(name)
+  }
+  return { current: current, names: names }
+}
+
+function themeRows(themes, query, usage, now, all) {
+  var data = themes || ({ current: "", names: [] })
+  var q = String(query || "").trim()
+  if (!q && !all) return []
+  var out = []
+  for (var i = 0; i < data.names.length; i++) {
+    var name = data.names[i]
+    var score = all ? 0 : matchScore(q, { name: "Theme: " + name, aliases: ["theme " + name, name] })
+    if (score < 0) continue
+    var key = "theme:" + name
+    var isCurrent = lower(name) === lower(data.current)
+    out.push(row({
+      key: key,
+      section: "actions",
+      title: "Theme: " + name,
+      subtitle: isCurrent ? "Current theme" : "omarchy theme set",
+      icon: ICON_BRUSH,
+      accessory: isCurrent ? "✓" : "",
+      frecencyKey: key,
+      pinnable: true,
+      primaryLabel: "Apply",
+      score: score + frecencyBonus(usage, key, now),
+      order: i,
+      payload: { kind: "theme", name: name }
+    }))
+  }
+  return out
+}
+
+// ---- Opt-in AI hand-off (omarchy agent prompt)
+
+function aiRows(query, agent) {
+  var q = String(query || "").trim()
+  if (!q) return []
+  var ask = q.match(/^ask\s+([\s\S]+)$/i)
+  var prompt = ask ? ask[1].trim() : q
+  if (!ask && q.split(/\s+/).length < 3) return []
+  var name = String(agent || "").trim() || "agent"
+  return [row({
+    key: "ai:ask",
+    section: "web",
+    title: "Ask " + name,
+    subtitle: clip(flatten(prompt), 120),
+    icon: ICON_CHAT,
+    primaryLabel: "Ask",
+    score: 1,
+    payload: { kind: "ai", prompt: prompt, preview: { type: "text", text: prompt } }
+  })]
+}
+
+// ---- Script commands (Raycast's header format)
+//
+// A script is any file in the scripts folder whose header carries
+// `@raycast.schemaVersion 1` and `@raycast.title`, commented with `#`, `//`
+// or `--`. Everything else is ignored, so a README in the folder is harmless.
+
+var SCRIPT_MODES = ["silent", "compact", "fullOutput", "inline"]
+var SCRIPT_OUTPUT_LIMIT = 65536
+
+function parseRefresh(value) {
+  var m = String(value || "").trim().match(/^(\d+)\s*([smhd])$/)
+  if (!m) return 0
+  var ms = Number(m[1]) * ({ s: 1000, m: 60000, h: 3600000, d: 86400000 })[m[2]]
+  return Math.max(10000, ms)
+}
+
+function parseScriptCommand(text) {
+  var lines = String(text || "").split("\n")
+  var meta = ({})
+  var args = []
+  var pattern = /^\s*(?:#|\/\/|--)\s*@raycast\.([A-Za-z0-9]+)\s*(.*?)\s*$/
+
+  for (var i = 0; i < lines.length; i++) {
+    var m = lines[i].match(pattern)
+    if (!m) continue
+    var arg = m[1].match(/^argument([123])$/)
+    if (arg) {
+      var spec = parseJson(m[2])
+      if (spec) {
+        args[Number(arg[1]) - 1] = {
+          type: String(spec.type || "text"),
+          placeholder: String(spec.placeholder || "argument" + arg[1]),
+          optional: spec.optional === true,
+          percentEncoded: spec.percentEncoded === true
+        }
+      }
+      continue
+    }
+    meta[m[1]] = m[2]
+  }
+
+  if (String(meta.schemaVersion) !== "1" || !meta.title) return null
+  var compact = []
+  for (var a = 0; a < args.length; a++) if (args[a]) compact.push(args[a])
+  var icon = String(meta.icon || "")
+  return {
+    title: clip(meta.title, 200),
+    mode: SCRIPT_MODES.indexOf(meta.mode) >= 0 ? meta.mode : "fullOutput",
+    packageName: String(meta.packageName || ""),
+    // Raycast also takes paths and URLs; only an emoji means anything here.
+    icon: /^[^\x00-\x7f]{1,8}$/.test(icon) ? icon : "",
+    arguments: compact,
+    needsConfirmation: meta.needsConfirmation === "true",
+    refreshMs: meta.mode === "inline" ? parseRefresh(meta.refreshTime) : 0
+  }
+}
+
+// Records are `\x1e<path>\x1f<0|1 executable>\x1f<head of file>`.
+function parseScriptRecords(text) {
+  var chunks = String(text || "").split("\x1e")
+  var out = []
+  for (var i = 1; i < chunks.length; i++) {
+    var fields = chunks[i].split("\x1f")
+    if (fields.length < 3) continue
+    var meta = parseScriptCommand(fields.slice(2).join("\x1f"))
+    if (!meta) continue
+    var stem = basename(fields[0]).replace(/\.[^.]+$/, "")
+    out.push({ path: fields[0], executable: fields[1] === "1", keyword: lower(stem).replace(/\s+/g, "-"), meta: meta })
+  }
+  return out
+}
+
+function scriptKeywordEntries(scripts) {
+  var values = scripts || []
+  var out = []
+  for (var i = 0; i < values.length; i++) out.push({ keyword: values[i].keyword, name: values[i].meta.title })
+  return out
+}
+
+// Whitespace-separated, with "double quotes" keeping spaces together.
+function splitArguments(text) {
+  var out = []
+  var pattern = /"([^"]*)"|(\S+)/g
+  var m
+  while ((m = pattern.exec(String(text || ""))) !== null) out.push(m[1] !== undefined ? m[1] : m[2])
+  return out
+}
+
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'"
+}
+
+function scriptRows(scripts, query, usage, now, inline, all) {
+  var values = scripts || []
+  var outputs = inline || ({})
+  var q = String(query || "").trim()
+  if (!q && !all) return []
+  var out = []
+
+  for (var i = 0; i < values.length; i++) {
+    var script = values[i]
+    var meta = script.meta
+    var admission = all ? { direct: false, argument: "", score: 0 } : keywordAdmission(q, meta.title, script.keyword)
+    if (!admission) continue
+
+    var typed = admission.direct ? splitArguments(admission.argument) : []
+    var args = []
+    var missing = ""
+    for (var a = 0; a < meta.arguments.length; a++) {
+      var spec = meta.arguments[a]
+      var value = typed[a] !== undefined ? typed[a] : ""
+      if (!value && !spec.optional && !missing) missing = spec.placeholder
+      args.push(spec.percentEncoded ? encodeURIComponent(value) : value)
+    }
+
+    var placeholders = meta.arguments.map(function(spec) { return "<" + spec.placeholder + ">" }).join(" ")
+    var completing = !admission.direct && meta.arguments.length > 0 && missing !== "" && script.executable
+    var disabled = !script.executable || (admission.direct && missing !== "")
+    var key = "sc:" + script.path
+    var subtitle = !script.executable
+      ? "not executable"
+      : (meta.mode === "inline" && outputs[script.path] ? outputs[script.path] : script.keyword + (placeholders ? " " + placeholders : ""))
+    var primary = !script.executable ? "Not executable" : (completing ? "Type keyword" : (disabled ? "Needs " + missing : "Run"))
+
+    out.push(row({
+      key: key,
+      section: "commands",
+      promoted: admission.direct,
+      title: meta.title + (admission.direct && typed.length ? ": " + typed.join(" ") : ""),
+      subtitle: subtitle,
+      icon: meta.icon || ICON_CODE,
+      keyword: script.keyword,
+      frecencyKey: key,
+      pinnable: true,
+      confirm: meta.needsConfirmation && !disabled && !completing,
+      primaryLabel: primary,
+      score: admission.score + frecencyBonus(usage, key, now),
+      order: i,
+      payload: {
+        kind: "script", path: script.path, mode: meta.mode, title: meta.title, args: args,
+        keyword: script.keyword, complete: completing, disabled: disabled && !completing,
+        preview: { type: "file", path: script.path }
+      }
+    }))
+  }
+  return out
+}
+
+function lastLine(text) {
+  var lines = String(text || "").split("\n")
+  for (var i = lines.length - 1; i >= 0; i--) if (lines[i].trim()) return lines[i].trim()
+  return ""
+}
+
+// ---- Actions panel (Ctrl+K)
+//
+// The first two entries are always the row's primary and secondary, so the
+// footer and the panel never disagree about what Enter does.
+function rowActions(item, state) {
+  if (!item) return []
+  var p = item.payload || ({})
+  var current = normalizeState(state)
+  var out = [{ id: "primary", label: item.primaryLabel, shortcut: "↵" }]
+  if (item.secondaryLabel) out.push({ id: "secondary", label: item.secondaryLabel, shortcut: "Ctrl+↵" })
+  function add(id, label, shortcut) { out.push({ id: id, label: label, shortcut: shortcut || "" }) }
+
+  if (p.kind === "app") add("copy-id", "Copy desktop id")
+  else if (p.kind === "menu" && p.action) add("copy-command", "Copy command")
+  else if (p.kind === "keybinding" && p.combo) add("copy-combo", "Copy key combo")
+  else if (p.kind === "file") {
+    add("copy-path", "Copy path")
+    add("terminal-here", "Open terminal here")
+    add("reveal", "Reveal in file manager")
+  } else if (p.kind === "clipboard") add("delete-entry", "Delete from history", "⌦")
+  else if (p.kind === "quicklink" && !p.complete) add("copy-url", "Copy URL")
+  else if (p.kind === "command") {
+    if (!p.terminal) add("run-terminal", "Run in terminal")
+    add("copy-command", "Copy command")
+  } else if (p.kind === "answer") add("copy-expression", "Copy with expression")
+  else if (p.kind === "theme") add("preview-theme", "Preview in terminal")
+  else if (p.kind === "omarchyCommand") add("copy-command", "Copy command")
+  else if (p.kind === "script") {
+    if (p.mode !== "fullOutput" && !p.disabled && !p.complete) add("run-terminal", "Run in terminal")
+    add("copy-path", "Copy script path")
+  }
+
+  if (item.pinnable) add("pin", current.pins.indexOf(item.key) >= 0 ? "Unpin" : "Pin", "Ctrl+.")
+  if (item.frecencyKey && current.usage[item.frecencyKey]) add("reset-ranking", "Reset ranking")
+  if (p.kind === "app") add("hide", "Hide")
+  return out
+}
+
+// ---- Currency (opt-in, ECB daily reference rates, EUR base)
+
+var CURRENCY_NAMES = {
+  "€": "EUR", eur: "EUR", euro: "EUR", euros: "EUR",
+  "$": "USD", usd: "USD", "us$": "USD", dollar: "USD", dollars: "USD", bucks: "USD",
+  "£": "GBP", gbp: "GBP", pound: "GBP", pounds: "GBP", quid: "GBP",
+  "¥": "JPY", jpy: "JPY", yen: "JPY",
+  chf: "CHF", franc: "CHF", francs: "CHF",
+  cny: "CNY", yuan: "CNY", rmb: "CNY", renminbi: "CNY",
+  "₹": "INR", inr: "INR", rupee: "INR", rupees: "INR",
+  "₩": "KRW", krw: "KRW", won: "KRW",
+  aud: "AUD", cad: "CAD", nzd: "NZD", hkd: "HKD", sgd: "SGD",
+  sek: "SEK", nok: "NOK", dkk: "DKK", isk: "ISK",
+  pln: "PLN", zloty: "PLN", czk: "CZK", koruna: "CZK", huf: "HUF", forint: "HUF", ron: "RON", leu: "RON", bgn: "BGN", lev: "BGN",
+  try: "TRY", lira: "TRY", brl: "BRL", real: "BRL", reais: "BRL", mxn: "MXN",
+  idr: "IDR", rupiah: "IDR", ils: "ILS", shekel: "ILS", shekels: "ILS", myr: "MYR", ringgit: "MYR",
+  php: "PHP", thb: "THB", baht: "THB", zar: "ZAR", rand: "ZAR"
+}
+
+var CURRENCY_PATTERN = /^([€$£¥₹₩]?)\s*(\d+(?:[.,]\d+)?)\s*([a-z$€£¥₹₩]*)\s+(?:to|in|as|->|→|=)\s+([a-z$€£¥₹₩]+)$/
+
+// { amount, from, to } when the query is shaped like a currency conversion
+// between two known currencies, whether or not rates are loaded.
+function currencyRequest(input) {
+  var m = lower(input).trim().replace(/\s+/g, " ").match(CURRENCY_PATTERN)
+  if (!m) return null
+  if (m[1] && m[3]) return null
+  var from = CURRENCY_NAMES[m[1] || m[3]]
+  var to = CURRENCY_NAMES[m[4]]
+  if (!from || !to) return null
+  var amount = parseFloat(m[2].replace(",", "."))
+  return isFinite(amount) ? { amount: amount, from: from, to: to } : null
+}
+
+function parseEcbRates(xml) {
+  var text = String(xml || "")
+  var rates = { EUR: 1 }
+  var found = 0
+  var pattern = /currency=['"](\w{3})['"]\s+rate=['"]([\d.]+)['"]/g
+  var m
+  while ((m = pattern.exec(text)) !== null) {
+    var value = parseFloat(m[2])
+    if (!isFinite(value) || value <= 0) continue
+    rates[m[1]] = value
+    found += 1
+  }
+  var date = text.match(/time=['"](\d{4}-\d{2}-\d{2})['"]/)
+  return found > 0 ? { date: date ? date[1] : "", rates: rates } : null
+}
+
+function convertCurrency(input, rates) {
+  var request = currencyRequest(input)
+  if (!request || !rates || !rates.rates) return null
+  var from = rates.rates[request.from]
+  var to = rates.rates[request.to]
+  if (!from || !to) return null
+  var value = request.amount / from * to
+  var text = value.toFixed(value !== 0 && Math.abs(value) < 0.01 ? 4 : 2) + " " + request.to
+  var stamp = ""
+  var m = String(rates.date || "").match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (m) stamp = "rates " + Number(m[3]) + " " + shortMonth(Number(m[2]) - 1)
+  return { display: text, copyText: text, subtitle: stamp || "ECB rates", icon: ICON_MONEY }
+}
+
+// ---- Clipboard history edits, same shape the stock clipboard writes
+
+function removeClipboardEntry(raw, historyIndex) {
+  var parsed
+  try { parsed = JSON.parse(String(raw || "")) } catch (e) { return null }
+  if (!Array.isArray(parsed)) return null
+  var index = Number(historyIndex)
+  if (!(index >= 0 && index < parsed.length) || Math.floor(index) !== index) return null
+  parsed.splice(index, 1)
+  return JSON.stringify(parsed, null, 2) + "\n"
+}
+
+// Text for the preview pane when no process is needed.
+function previewText(preview, now) {
+  if (!preview) return ""
+  if (preview.type === "text") return String(preview.text || "")
+  if (preview.type === "snippet") return expandTemplate(preview.template, { argument: preview.argument || "", clipboard: "{clipboard}", selection: "{selection}", now: now }, "text")
+  return ""
+}
+
+// argv for previews that need a process, or null.
+function previewCommand(preview) {
+  if (!preview) return null
+  // A folder lists its entries; `head` on a directory prints nothing.
+  if (preview.type === "file") return ["bash", "-c", 'if [ -d "$1" ]; then ls -1Ap -- "$1" | head -n 200; else head -c ' + PREVIEW_LIMIT + ' -- "$1"; fi', "bash", preview.path]
+  if (preview.type === "content") return ["rg", "-n", "-C", "3", "--max-count", "5", "--fixed-strings", "--ignore-case", "--", preview.term, preview.path]
+  return null
+}
+
+// A NUL in the first 16 KiB is a binary file; printing it is noise.
+function cleanPreview(text) {
+  var value = String(text || "")
+  return value.indexOf("\u0000") >= 0 ? "Binary file" : value
 }
 
 // ---- Calculator
@@ -1867,8 +3085,33 @@ function normalizeConfig(raw) {
     searchQuicklink: found,
     quicklinks: quicklinks,
     snippets: normalizeSnippets(value.snippets),
-    commands: normalizeCommands(value.commands)
+    commands: normalizeCommands(value.commands),
+    // The preview pane is on unless switched off; network features are off
+    // unless switched on.
+    preview: value.preview !== false,
+    currency: value.currency === true,
+    ai: value.ai === true,
+    scriptDirs: normalizeScriptDirs(value.scriptDirs)
   }
+}
+
+function normalizeScriptDirs(raw) {
+  var values = Array.isArray(raw) ? raw : []
+  var out = []
+  for (var i = 0; i < values.length; i++) {
+    var dir = values[i]
+    if (typeof dir !== "string" || !dir.trim() || /[\x00-\x1f]/.test(dir)) continue
+    if (out.indexOf(dir.trim()) < 0) out.push(dir.trim())
+  }
+  return out.slice(0, 8)
+}
+
+// `~/` in a configured folder means the user's home.
+function expandHome(path, home) {
+  var value = String(path || "")
+  if (value === "~") return String(home || "")
+  if (value.indexOf("~/") === 0) return String(home || "") + value.slice(1)
+  return value
 }
 
 // The config sits next to Omarchy's own menu JSONC, so it accepts comments and
@@ -2029,6 +3272,50 @@ if (typeof module !== "undefined") {
     expandTemplate: expandTemplate,
     normalizeConfig: normalizeConfig,
     parseJson: parseJson,
-    firstLine: firstLine
+    firstLine: firstLine,
+    withinOneEdit: withinOneEdit,
+    updateState: updateState,
+    toggleHidden: toggleHidden,
+    resetUsage: resetUsage,
+    rememberQuery: rememberQuery,
+    hiddenMap: hiddenMap,
+    hiddenRows: hiddenRows,
+    dateAnswer: dateAnswer,
+    parseDay: parseDay,
+    timeZoneRequest: timeZoneRequest,
+    timeZoneCommand: timeZoneCommand,
+    timeZoneRows: timeZoneRows,
+    resolveZone: resolveZone,
+    ZONE_CITIES: ZONE_CITIES,
+    ZONE_ABBREVIATIONS: ZONE_ABBREVIATIONS,
+    parseColour: parseColour,
+    colourAnswers: colourAnswers,
+    reminderRows: reminderRows,
+    parseProcesses: parseProcesses,
+    processRows: processRows,
+    parseCommandCatalog: parseCommandCatalog,
+    buildCommandCatalog: buildCommandCatalog,
+    commandCatalogRows: commandCatalogRows,
+    parseThemes: parseThemes,
+    themeRows: themeRows,
+    aiRows: aiRows,
+    parseScriptCommand: parseScriptCommand,
+    parseScriptRecords: parseScriptRecords,
+    splitArguments: splitArguments,
+    scriptRows: scriptRows,
+    shellQuote: shellQuote,
+    lastLine: lastLine,
+    rowActions: rowActions,
+    currencyRequest: currencyRequest,
+    parseEcbRates: parseEcbRates,
+    convertCurrency: convertCurrency,
+    removeClipboardEntry: removeClipboardEntry,
+    previewText: previewText,
+    previewCommand: previewCommand,
+    cleanPreview: cleanPreview,
+    expandHome: expandHome,
+    SCRIPT_OUTPUT_LIMIT: SCRIPT_OUTPUT_LIMIT,
+    TYPO_SCORE: TYPO_SCORE,
+    nearMissScore: nearMissScore
   }
 }
