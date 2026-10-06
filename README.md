@@ -15,14 +15,15 @@ no second Quickshell.
 omarchy plugin add https://github.com/TerrifiedBug/omacast.git --enable
 ```
 
-Then bind a key in `~/.config/hypr/bindings.lua`:
+Open Settings to bind the palette key:
 
-```lua
-o.bind("ALT + SPACE", "OmaCast", "omarchy-shell shell toggle io.github.terrifiedbug.omacast '{}'")
+```bash
+omarchy-shell shell summon io.github.terrifiedbug.omacast '{"scope":"settings"}'
 ```
 
-`ALT + SPACE` is free in stock Omarchy, so `SUPER + SPACE` stays the Omarchy
-menu. Run `hyprctl reload` after editing the file.
+Select **Open palette**, press Enter, type a chord and press Enter to save.
+The suggested `ALT + SPACE` is free in stock Omarchy; `SUPER + SPACE` keeps
+opening the Omarchy menu.
 
 You can also open it straight into a scope, or with the field prefilled:
 
@@ -40,8 +41,8 @@ hl.layer_rule({ match = { namespace = "omarchy-omacast" }, no_anim = true, anima
 
 ### Bar button
 
-OmaCast ships a search button for the bar, hidden until you ask for it.
-Enabling the plugin gives it a bar slot on the right; turn the button on with:
+Turn **Bar button** on in Settings. Enabling the plugin gives it a slot on the
+right, with the button hidden by default. The CLI works too:
 
 ```bash
 omarchy bar set io.github.terrifiedbug.omacast button true
@@ -58,9 +59,11 @@ An install from before the button existed has no bar slot. Run
 omarchy plugin remove io.github.terrifiedbug.omacast
 ```
 
-Then drop the `o.bind("ALT + SPACE", "OmaCast", …)` line from
-`~/.config/hypr/bindings.lua` and run `hyprctl reload`. A few files are left
-behind if you want them gone:
+Before removing the plugin, use Settings to unbind the palette key and turn
+off its clipboard shortcut. You can also remove the whole block between
+`-- omacast: begin.` and `-- omacast: end.` in `~/.config/hypr/bindings.lua`,
+then run `hyprctl reload`. Remove any hand-written OmaCast bindings too.
+A few files are left behind if you want them gone:
 
 ```bash
 rm ~/.local/state/omarchy/omacast-state.json   # pins, hidden rows, usage counts, last query
@@ -135,13 +138,33 @@ Show hidden to bring it back.
 
 ## Configuration
 
-Config lives in `~/.config/omarchy/omacast.json` and does not exist until you
-want it. Search the palette for `config` and press Enter: that row copies
-`omacast.example.json` into place and opens it in your editor. The example
-changes nothing on its own, it just documents the keys.
+Search the palette for `settings` and press Enter. General covers the search
+engine, preview pane, currency rates, Ask agent and bar button. Shortcuts
+sets the palette key and the `SUPER + CTRL + V` clipboard override. Library
+holds quicklinks, snippets, commands, built-in quicklinks and script folders.
 
-Comments and trailing commas are fine, like Omarchy's own menu JSONC. Saving
-applies immediately, with no restart.
+Use the usual arrows and Enter to browse. Enter toggles an On/Off row or
+opens a text field in the search input, with its value selected. Enter saves;
+Esc cancels. Esc or Backspace in an empty search field returns to the parent
+scope. An entry's Delete row needs Enter twice. Ctrl+Enter runs a secondary
+action, such as removing a script folder or unbinding the palette key.
+
+Snippet text uses `\n` for a newline and `\\` for a literal backslash in the
+single-line editor. Reopening the field shows those escapes again.
+
+Settings writes `~/.config/omarchy/omacast.json` as plain, indented JSON on
+each save. It creates the file when needed, drops comments and keeps unknown
+top-level keys. You can still edit the file by hand: comments and trailing
+commas are accepted, and saving applies immediately without a restart.
+Advanced's **Edit config file** row opens your editor and creates the file
+from `omacast.example.json` if it doesn't exist.
+
+Shortcut settings own a marked block at the end of
+`~/.config/hypr/bindings.lua`. Toggle the clipboard override off to restore
+Omarchy's clipboard manager, or use Unbind on the palette key. Removing the
+whole marked block undoes both. OmaCast reloads Hyprland after a change and
+restores the previous file if Hyprland reports a config error. Existing
+hand-written OmaCast bindings outside the block need removing by hand.
 
 ```json
 {

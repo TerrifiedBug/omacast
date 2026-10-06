@@ -11,7 +11,7 @@
 
 // ---- Sections
 
-var SECTIONS = ["answer", "pinned", "recent", "apps", "windows", "actions", "keybindings", "quicklinks", "snippets", "commands", "clipboard", "emoji", "files", "processes", "hidden", "help", "web"]
+var SECTIONS = ["answer", "pinned", "recent", "apps", "windows", "actions", "keybindings", "quicklinks", "snippets", "commands", "clipboard", "emoji", "files", "processes", "hidden", "help", "web", "settingsGeneral", "settingsShortcuts", "settingsLibrary", "settingsAdvanced", "settingsEntries", "settingsFields"]
 
 var SECTION_TITLES = {
   answer: "Answer",
@@ -30,7 +30,13 @@ var SECTION_TITLES = {
   processes: "Processes",
   hidden: "Hidden",
   help: "Keywords",
-  web: "Web"
+  web: "Web",
+  settingsGeneral: "General",
+  settingsShortcuts: "Shortcuts",
+  settingsLibrary: "Library",
+  settingsAdvanced: "Advanced",
+  settingsEntries: "Entries",
+  settingsFields: "Fields"
 }
 
 var SECTION_CAPS = {
@@ -52,7 +58,13 @@ var SECTION_CAPS = {
   hidden: 200,
   help: 60,
   // The web fallback, with the opt-in AI row above it.
-  web: 2
+  web: 2,
+  settingsGeneral: 200,
+  settingsShortcuts: 200,
+  settingsLibrary: 200,
+  settingsAdvanced: 200,
+  settingsEntries: 200,
+  settingsFields: 200
 }
 
 // Glyphs are Nerd Font literals; the name rides along in a comment so a
@@ -115,7 +127,7 @@ function row(spec) {
     pinnable: value.pinnable === true,
     promoted: value.promoted === true,
     confirm: value.confirm === true,
-    primaryLabel: clip(value.primaryLabel || "Run", 40),
+    primaryLabel: clip(value.primaryLabel === undefined ? "Run" : value.primaryLabel, 40),
     secondaryLabel: clip(value.secondaryLabel || "", 40),
     score: typeof value.score === "number" && isFinite(value.score) ? value.score : 0,
     order: typeof value.order === "number" && isFinite(value.order) ? value.order : 0,
@@ -578,7 +590,11 @@ function emptyQueryRows(catalog, state, now) {
 // A pushed scope always wins: once the user is inside Clipboard, typing `f `
 // searches clipboard text for "f", it does not jump to files.
 
-var SCOPES = ["clipboard", "emoji", "files", "windows", "help", "kill", "content", "hidden"]
+var SCOPES = ["clipboard", "emoji", "files", "windows", "help", "kill", "content", "hidden", "settings"]
+
+function isSettingsScope(scope) {
+  return String(scope || "").indexOf("settings") === 0
+}
 
 // A lone hex colour is an answer, not a content search: `#f80` and
 // `#ff8800` go to the colour inspector, everything else after `#` to ripgrep.
@@ -1229,26 +1245,24 @@ function answerRows(query, ctx) {
   return out
 }
 
-// The config file does not exist until someone wants it, so the palette
-// carries the way in: this row opens it in the editor, creating it from the
-// shipped example on first use. The scripts folder gets the same treatment.
+// Settings opens inside the palette; the scripts folder still opens externally.
 function configRows(query, path, scriptDir) {
   var out = []
   var score = matchScore(query, {
-    name: "OmaCast Config",
-    aliases: ["settings", "preferences", "quicklinks", "snippets", "commands", "omacast"],
+    name: "OmaCast Settings",
+    aliases: ["settings", "preferences", "config", "shortcuts", "quicklinks", "snippets", "commands", "omacast"],
     text: String(path || "")
   })
   if (score >= 0) {
     out.push(row({
-      key: "cfg:config",
+      key: "cfg:settings",
       section: "actions",
-      title: "OmaCast Config",
+      title: "OmaCast Settings",
       subtitle: String(path || ""),
       icon: ICON_SETTINGS,
-      primaryLabel: "Edit",
+      primaryLabel: "Open",
       score: score,
-      payload: { kind: "config" }
+      payload: { kind: "scope", scope: "settings" }
     }))
   }
 
@@ -1390,6 +1404,100 @@ function helpRows(config, query, extra) {
   return out
 }
 
+// ---- Settings rows
+
+function filterSettingsRows(specs, query) {
+  var out = []
+  specs.forEach(function(spec, index) {
+    var score = matchScore(query, { name: spec.title, aliases: [spec.subtitle || ""] })
+    if (String(query || "").trim() && score < 0) return
+    spec.order = index
+    spec.score = score
+    spec.icon = ICON_SETTINGS
+    if (!spec.payload) {
+      spec.payload = { kind: "setting", action: spec.action }
+      if (spec.secondaryLabel) spec.payload.secondaryAction = spec.secondaryAction
+    }
+    out.push(row(spec))
+  })
+  // A direct setting match should not leave unrelated fuzzy shortcut rows.
+  var direct = out.some(function(entry) { return entry.score >= 6000 })
+  return direct ? out.filter(function(entry) { return entry.score >= 6000 }) : out
+}
+
+function settingsRows(doc, ctx, query) {
+  var config = ctx.config
+  var binds = ctx.binds
+  var specs = [
+    { key: "setting:engine", section: "settingsGeneral", title: "Search engine", subtitle: config.searchQuicklink ? config.searchQuicklink.name + " · " + config.searchQuicklink.keyword : "None", primaryLabel: "Change", action: { type: "push", scope: "settings:engine" } },
+    { key: "setting:preview", section: "settingsGeneral", title: "Preview pane", subtitle: "Beside the list on screens 1400 px and wider", accessory: doc.preview ? "On" : "Off", primaryLabel: "Toggle", action: { type: "config", op: { op: "set", key: "preview", value: !doc.preview } } },
+    { key: "setting:currency", section: "settingsGeneral", title: "Currency rates", subtitle: "Downloads ECB reference rates once a day", accessory: doc.currency ? "On" : "Off", primaryLabel: "Toggle", action: { type: "config", op: { op: "set", key: "currency", value: !doc.currency } } },
+    { key: "setting:ai", section: "settingsGeneral", title: "Ask agent", subtitle: "Adds an Ask row that hands the query to omarchy agent prompt", accessory: doc.ai ? "On" : "Off", primaryLabel: "Toggle", action: { type: "config", op: { op: "set", key: "ai", value: !doc.ai } } },
+    { key: "setting:barButton", section: "settingsGeneral", title: "Bar button", subtitle: ctx.barButton === null ? "No bar slot: disable OmaCast, then enable it on the right" : "", accessory: ctx.barButton === null ? "" : ctx.barButton ? "On" : "Off", primaryLabel: ctx.barButton === null ? "" : "Toggle", action: ctx.barButton === null ? { type: "none" } : { type: "barButton", value: !ctx.barButton } },
+    { key: "setting:palette", section: "settingsShortcuts", title: "Open palette", subtitle: binds.palette || (ctx.handBound ? "Bound by hand in bindings.lua" : "Not bound"), accessory: binds.palette ? "Keyboard" : "", primaryLabel: binds.palette ? "Change" : "Bind", secondaryLabel: binds.palette ? "Unbind" : "", action: { type: "editChord" }, secondaryAction: { type: "binds", patch: { palette: "" } } },
+    { key: "setting:clipboard", section: "settingsShortcuts", title: "Clipboard history on SUPER + CTRL + V", subtitle: "Replaces Omarchy's clipboard manager while on", accessory: binds.clipboard ? "On" : "Off", primaryLabel: "Toggle", action: { type: "binds", patch: { clipboard: !binds.clipboard } } }
+  ]
+  ;["quicklinks", "snippets", "commands"].forEach(function(kind) {
+    specs.push({ key: "setting:" + kind, section: "settingsLibrary", title: scopeTitle("settings:" + kind), subtitle: doc[kind].length + " entries", primaryLabel: "Browse", action: { type: "push", scope: "settings:" + kind } })
+  })
+  var hidden = DEFAULT_QUICKLINKS.filter(function(link) { return doc.hiddenQuicklinks.indexOf(link.keyword) >= 0 || doc.hiddenQuicklinks.indexOf(link.name.toLowerCase()) >= 0 }).length
+  specs.push({ key: "setting:builtins", section: "settingsLibrary", title: "Built-in quicklinks", subtitle: doc.builtinQuicklinks ? (7 - hidden) + " of 7 shown" : "Off", primaryLabel: "Browse", action: { type: "push", scope: "settings:builtins" } })
+  specs.push({ key: "setting:dirs", section: "settingsLibrary", title: "Script folders", subtitle: ctx.scriptDir + (doc.scriptDirs.length ? " + " + doc.scriptDirs.length + " more" : ""), primaryLabel: "Browse", action: { type: "push", scope: "settings:scriptDirs" } })
+  specs.push({ key: "setting:config", section: "settingsAdvanced", title: "Edit config file", subtitle: ctx.configPath, primaryLabel: "Edit", payload: { kind: "config" } })
+  specs.push({ key: "setting:scripts", section: "settingsAdvanced", title: "Scripts folder", subtitle: ctx.scriptDir, primaryLabel: "Open", payload: { kind: "scriptsFolder", path: ctx.scriptDir } })
+  return filterSettingsRows(specs, query)
+}
+
+function settingsChoiceRows(config, doc, query) {
+  return filterSettingsRows(config.quicklinks.map(function(link, index) {
+    return { key: "setting:engine:" + index, section: "settingsEntries", title: link.name, subtitle: link.keyword, accessory: link.keyword === doc.searchEngine ? "✓" : "", primaryLabel: "Use", action: { type: "config", op: { op: "set", key: "searchEngine", value: link.keyword }, pop: true } }
+  }), query)
+}
+
+function settingsBuiltinRows(doc, query) {
+  var specs = [{ key: "setting:builtins:enabled", section: "settingsEntries", title: "Use built-in quicklinks", accessory: doc.builtinQuicklinks ? "On" : "Off", primaryLabel: "Toggle", action: { type: "config", op: { op: "set", key: "builtinQuicklinks", value: !doc.builtinQuicklinks } } }]
+  DEFAULT_QUICKLINKS.forEach(function(link) {
+    var hidden = doc.hiddenQuicklinks.indexOf(link.keyword) >= 0
+    specs.push({ key: "setting:builtin:" + link.keyword, section: "settingsEntries", title: link.name, subtitle: link.keyword + " · " + link.url, accessory: hidden ? "Off" : "On", primaryLabel: "Toggle", action: { type: "config", op: { op: "toggleHidden", keyword: link.keyword } } })
+  })
+  return filterSettingsRows(specs, query)
+}
+
+function settingsListRows(doc, kind, query) {
+  if (!Object.prototype.hasOwnProperty.call(LIST_KINDS, kind)) return []
+  var specs = doc[kind].map(function(entry, index) {
+    var detail = kind === "quicklinks" ? entry.url : kind === "snippets" ? firstLine(entry.text) : entry.command
+    return { key: "setting:" + kind + ":" + index, section: "settingsEntries", title: entry.name || "(unnamed)", subtitle: entry.keyword + " · " + detail, primaryLabel: "Edit", action: { type: "push", scope: "settings:" + kind + ":" + index } }
+  })
+  specs.push({ key: "setting:" + kind + ":add", section: "settingsEntries", title: "Add " + LIST_KINDS[kind].label, primaryLabel: "Add", action: { type: "config", op: { op: "add", kind: kind }, pushIndex: true } })
+  return filterSettingsRows(specs, query)
+}
+
+function settingsEntryRows(doc, kind, index, query) {
+  if (!Object.prototype.hasOwnProperty.call(LIST_KINDS, kind) || !Number.isInteger(index) || index < 0 || index >= doc[kind].length) return []
+  var entry = doc[kind][index]
+  var labels = { name: "Name", keyword: "Keyword", url: "URL", text: "Text", command: "Command", terminal: "Run in a terminal", confirm: "Ask before running" }
+  var specs = LIST_KINDS[kind].fields.map(function(field) {
+    var current = entry[field]
+    var boolean = field === "terminal" || field === "confirm"
+    var value = field === "text" ? escapeMultiline(current) : current
+    return { key: "setting:" + kind + ":" + index + ":" + field, section: "settingsFields", title: labels[field], subtitle: boolean ? "" : value || "(empty)", accessory: boolean ? current ? "On" : "Off" : "", primaryLabel: boolean ? "Toggle" : "Edit", action: boolean
+      ? { type: "config", op: { op: "setField", kind: kind, index: index, field: field, value: !current } }
+      : { type: "editField", kind: kind, index: index, field: field, label: labels[field], value: value } }
+  })
+  specs.push({ key: "setting:" + kind + ":" + index + ":delete", section: "settingsFields", title: "Delete " + LIST_KINDS[kind].label, primaryLabel: "Delete", confirm: true, action: { type: "config", op: { op: "remove", kind: kind, index: index }, pop: true } })
+  return filterSettingsRows(specs, query)
+}
+
+function settingsDirRows(doc, scriptDir, query) {
+  var specs = [{ key: "setting:dir:default", section: "settingsEntries", title: scriptDir, subtitle: "Always included", primaryLabel: "Open", payload: { kind: "scriptsFolder", path: scriptDir } }]
+  doc.scriptDirs.forEach(function(path, index) {
+    specs.push({ key: "setting:dir:" + index, section: "settingsEntries", title: path, primaryLabel: "Edit", secondaryLabel: "Remove", action: { type: "editDir", index: index, value: path }, secondaryAction: { type: "config", op: { op: "removeDir", index: index } } })
+  })
+  specs.push({ key: "setting:dir:add", section: "settingsEntries", title: "Add folder", primaryLabel: "Add", action: { type: "editDir", index: -1, value: "~/" } })
+  return filterSettingsRows(specs, query)
+}
+
 function scopeRows(query) {
   var q = String(query || "").trim()
   if (!q) return []
@@ -1414,7 +1522,17 @@ function scopeRows(query) {
   return out
 }
 
-function scopeTitle(scope) {
+function scopeTitle(scope, doc) {
+  if (isSettingsScope(scope)) {
+    var parts = String(scope).split(":")
+    if (!parts[1]) return "Settings"
+    var kind = parts[1]
+    if (Object.prototype.hasOwnProperty.call(LIST_KINDS, kind) && parts[2] !== undefined) {
+      var entry = doc && doc[kind] && doc[kind][parseInt(parts[2], 10)]
+      return entry && entry.name || LIST_KINDS[kind].label
+    }
+    return { engine: "Search engine", builtins: "Built-in quicklinks", quicklinks: "Quicklinks", snippets: "Snippets", commands: "Commands", scriptDirs: "Script folders" }[kind] || "Settings"
+  }
   if (scope === "hidden") return "Hidden"
   for (var i = 0; i < SCOPE_ROWS.length; i++) {
     if (SCOPE_ROWS[i].scope === scope) return SCOPE_ROWS[i].name
@@ -1423,6 +1541,7 @@ function scopeTitle(scope) {
 }
 
 function scopePlaceholder(scope) {
+  if (isSettingsScope(scope)) return "Filter settings…"
   if (scope === "clipboard") return "Search clipboard history…"
   if (scope === "emoji") return "Search emoji…"
   if (scope === "files") return "Search files in your home…"
@@ -2956,7 +3075,7 @@ function expandTemplate(template, ctx, mode) {
   return text
 }
 
-// ---- Config (~/.config/omarchy/omacast.json), never written by the plugin
+// ---- Config (~/.config/omarchy/omacast.json), written by Settings
 
 var DEFAULT_SEARCH_ENGINE = "g"
 
@@ -3093,6 +3212,176 @@ function normalizeConfig(raw) {
     ai: value.ai === true,
     scriptDirs: normalizeScriptDirs(value.scriptDirs)
   }
+}
+
+// ---- Hyprland bindings block
+
+var BIND_BEGIN = "-- omacast: begin. Written by OmaCast settings; remove the block whole to undo."
+var BIND_END = "-- omacast: end."
+var CLIPBOARD_CHORD = "SUPER + CTRL + V"
+
+function renderBindBlock(binds) {
+  if (!binds.palette && !binds.clipboard) return ""
+  var lines = []
+  if (binds.palette) lines.push('o.rebind("' + binds.palette + '", "OmaCast", "omarchy-shell shell toggle io.github.terrifiedbug.omacast \'{}\'")')
+  if (binds.clipboard) lines.push('o.rebind("SUPER + CTRL + V", "OmaCast clipboard", "omarchy-shell shell toggle io.github.terrifiedbug.omacast \'{\\"scope\\":\\"clipboard\\"}\'")')
+  return "\n" + BIND_BEGIN + "\n" + lines.join("\n") + "\n" + BIND_END + "\n"
+}
+
+function bindBlockRange(text) {
+  var begin = new RegExp("^" + BIND_BEGIN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "m").exec(text)
+  if (!begin) return null
+  var tail = text.slice(begin.index + BIND_BEGIN.length)
+  var end = new RegExp("^" + BIND_END.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "m").exec(tail)
+  if (!end) return { start: begin.index, end: -1 }
+  var after = begin.index + BIND_BEGIN.length + end.index + BIND_END.length
+  if (text.charAt(after) === "\n") after += 1
+  return { start: begin.index, end: after }
+}
+
+function parseBindBlock(text) {
+  var value = String(text || "")
+  var range = bindBlockRange(value)
+  if (!range || range.end < 0) return { palette: "", clipboard: false, found: false }
+  var block = value.slice(range.start, range.end)
+  var palette = /^o\.rebind\("([^"]+)", "OmaCast",/m.exec(block)
+  return { palette: palette ? palette[1] : "", clipboard: block.indexOf('"OmaCast clipboard"') >= 0, found: true }
+}
+
+function replaceBindBlock(text, block) {
+  var value = String(text || "")
+  var range = bindBlockRange(value)
+  if (range && range.end < 0) return null
+  if (!range) {
+    if (!block) return value
+    return value + (value && value.charAt(value.length - 1) !== "\n" ? "\n" : "") + block
+  }
+  var start = range.start
+  if (!block && start > 0 && value.slice(start - 2, start) === "\n\n") start -= 1
+  // Render includes the blank separator for appending, not for replacing.
+  return value.slice(0, start) + (block ? block.slice(1) : "") + value.slice(range.end)
+}
+
+function handBoundPalette(records, binds) {
+  return !binds.palette && (records || []).some(function(record) {
+    return record.arg.indexOf("io.github.terrifiedbug.omacast") >= 0 && record.combo !== CLIPBOARD_CHORD
+  })
+}
+
+function barButtonSetting(shellConfig, id) {
+  var layout = shellConfig && shellConfig.bar && shellConfig.bar.layout
+  if (!layout) return null
+  var sections = ["left", "center", "right"]
+  for (var s = 0; s < sections.length; s++) {
+    var entries = Array.isArray(layout[sections[s]]) ? layout[sections[s]] : []
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] && entries[i].id === id) return entries[i].button === true || entries[i].button === "true"
+    }
+  }
+  return null
+}
+
+// ---- Settings document
+
+var CONFIG_KEYS = ["searchEngine", "builtinQuicklinks", "hiddenQuicklinks", "quicklinks", "snippets", "commands", "scriptDirs", "preview", "currency", "ai"]
+var LIST_KINDS = {
+  quicklinks: { fields: ["name", "keyword", "url"], label: "Quicklink" },
+  snippets: { fields: ["name", "keyword", "text"], label: "Snippet" },
+  commands: { fields: ["name", "keyword", "command", "terminal", "confirm"], label: "Command" }
+}
+
+function editableConfig(raw) {
+  var doc = raw && typeof raw === "object" && !Array.isArray(raw) ? JSON.parse(JSON.stringify(raw)) : ({})
+  doc.searchEngine = typeof doc.searchEngine === "string" ? doc.searchEngine : "g"
+  doc.builtinQuicklinks = typeof doc.builtinQuicklinks === "boolean" ? doc.builtinQuicklinks : true
+  doc.preview = typeof doc.preview === "boolean" ? doc.preview : true
+  doc.currency = doc.currency === true
+  doc.ai = doc.ai === true
+  ;["hiddenQuicklinks", "scriptDirs"].forEach(function(key) {
+    doc[key] = (Array.isArray(doc[key]) ? doc[key] : []).filter(function(value) { return typeof value === "string" })
+  })
+  Object.keys(LIST_KINDS).forEach(function(kind) {
+    doc[kind] = (Array.isArray(doc[kind]) ? doc[kind] : []).filter(function(entry) {
+      return entry && typeof entry === "object" && !Array.isArray(entry)
+    }).map(function(entry) {
+      var out = ({})
+      LIST_KINDS[kind].fields.forEach(function(field) {
+        out[field] = field === "terminal" || field === "confirm"
+          ? entry[field] === true : typeof entry[field] === "string" ? entry[field] : ""
+      })
+      return out
+    })
+  })
+  return doc
+}
+
+function updateConfig(raw, op) {
+  var doc = editableConfig(raw)
+  if (!op) return doc
+  var kind = Object.prototype.hasOwnProperty.call(LIST_KINDS, op.kind) ? op.kind : ""
+  var indexed = kind && Number.isInteger(op.index) && op.index >= 0 && op.index < doc[kind].length
+  var dirIndex = Number.isInteger(op.index) && op.index >= 0 && op.index < doc.scriptDirs.length
+  if (op.op === "set" && ["searchEngine", "preview", "currency", "ai", "builtinQuicklinks"].indexOf(op.key) >= 0) {
+    doc[op.key] = op.value
+  } else if (op.op === "toggleHidden") {
+    var hidden = doc.hiddenQuicklinks.indexOf(op.keyword)
+    if (hidden < 0) doc.hiddenQuicklinks.push(op.keyword)
+    else doc.hiddenQuicklinks = doc.hiddenQuicklinks.filter(function(keyword) { return keyword !== op.keyword })
+  } else if (op.op === "setField" && indexed && LIST_KINDS[kind].fields.indexOf(op.field) >= 0) {
+    doc[kind][op.index][op.field] = op.value
+  } else if (op.op === "add" && kind) {
+    var entry = ({})
+    LIST_KINDS[kind].fields.forEach(function(field) { entry[field] = field === "terminal" || field === "confirm" ? false : "" })
+    doc[kind].push(entry)
+  } else if (op.op === "remove" && indexed) {
+    doc[kind].splice(op.index, 1)
+  } else if (op.op === "addDir") {
+    doc.scriptDirs.push(op.path)
+  } else if (op.op === "setDir" && dirIndex) {
+    doc.scriptDirs[op.index] = op.path
+  } else if (op.op === "removeDir" && dirIndex) {
+    doc.scriptDirs.splice(op.index, 1)
+  }
+  return editableConfig(doc)
+}
+
+function serializeConfig(doc) {
+  var ordered = ({})
+  CONFIG_KEYS.forEach(function(key) { ordered[key] = doc[key] })
+  Object.keys(doc).forEach(function(key) {
+    if (CONFIG_KEYS.indexOf(key) < 0) Object.defineProperty(ordered, key, { value: doc[key], enumerable: true })
+  })
+  return JSON.stringify(ordered, null, 2) + "\n"
+}
+
+function escapeMultiline(text) {
+  return String(text).replace(/\\/g, "\\\\").replace(/\n/g, "\\n")
+}
+
+function unescapeMultiline(text) {
+  return String(text).replace(/\\(\\|n)/g, function(match, escaped) { return escaped === "n" ? "\n" : "\\" })
+}
+
+function validateField(kind, field, text) {
+  var value = String(text)
+  if (field === "keyword") {
+    value = value.toLowerCase()
+    if (value && !KEYWORD_PATTERN.test(value)) return { ok: false, error: "Keyword: letters, digits, . and -, up to 16 characters" }
+  } else if (kind === "snippets" && field === "text") {
+    value = unescapeMultiline(value)
+  } else if (["name", "url", "command", "path"].indexOf(field) >= 0) {
+    value = value.trim()
+  }
+  return { ok: true, value: value }
+}
+
+function normalizeChord(text) {
+  var tokens = String(text || "").toUpperCase().split(/[+\s]+/).filter(function(token) { return !!token })
+  if (!tokens.length) return ""
+  var key = tokens.pop()
+  if (!/^[A-Z0-9]$|^F([1-9]|1[0-9]|2[0-4])$|^(SPACE|RETURN|TAB|ESCAPE|BACKSPACE|DELETE|INSERT|HOME|END|PRIOR|NEXT|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL|COMMA|PERIOD|SLASH|SEMICOLON|APOSTROPHE|GRAVE|BRACKETLEFT|BRACKETRIGHT|BACKSLASH|PRINT)$/.test(key)) return ""
+  if (tokens.some(function(token) { return ["SUPER", "CTRL", "ALT", "SHIFT"].indexOf(token) < 0 })) return ""
+  return tokens.concat([key]).join(" + ")
 }
 
 function normalizeScriptDirs(raw) {
@@ -3271,6 +3560,32 @@ if (typeof module !== "undefined") {
     needsSelection: needsSelection,
     expandTemplate: expandTemplate,
     normalizeConfig: normalizeConfig,
+    CONFIG_KEYS: CONFIG_KEYS,
+    LIST_KINDS: LIST_KINDS,
+    editableConfig: editableConfig,
+    updateConfig: updateConfig,
+    serializeConfig: serializeConfig,
+    escapeMultiline: escapeMultiline,
+    unescapeMultiline: unescapeMultiline,
+    validateField: validateField,
+    normalizeChord: normalizeChord,
+    isSettingsScope: isSettingsScope,
+    filterSettingsRows: filterSettingsRows,
+    settingsRows: settingsRows,
+    settingsChoiceRows: settingsChoiceRows,
+    settingsBuiltinRows: settingsBuiltinRows,
+    settingsListRows: settingsListRows,
+    settingsEntryRows: settingsEntryRows,
+    settingsDirRows: settingsDirRows,
+    BIND_BEGIN: BIND_BEGIN,
+    BIND_END: BIND_END,
+    CLIPBOARD_CHORD: CLIPBOARD_CHORD,
+    renderBindBlock: renderBindBlock,
+    bindBlockRange: bindBlockRange,
+    parseBindBlock: parseBindBlock,
+    replaceBindBlock: replaceBindBlock,
+    handBoundPalette: handBoundPalette,
+    barButtonSetting: barButtonSetting,
     parseJson: parseJson,
     firstLine: firstLine,
     withinOneEdit: withinOneEdit,

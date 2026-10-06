@@ -51,6 +51,9 @@ Item {
   // What the preview pane shows for the selected row, or null to hide it.
   property var previewState: null
 
+  property var editing: null
+  property string notice: ""
+
   readonly property string manifestId: manifest && manifest.id ? manifest.id : "io.github.terrifiedbug.omacast"
   readonly property string scope: scopeStack.length > 0 ? scopeStack[scopeStack.length - 1].scope : "root"
   readonly property string configPath: root.home + "/.config/omarchy/omacast.json"
@@ -96,6 +99,7 @@ Item {
   // ---- Lifecycle
 
   function open(payloadJson) {
+    root.editing = null
     var payload = ({})
     try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
 
@@ -122,6 +126,7 @@ Item {
   }
 
   function close() {
+    root.editing = null
     // ↑ in an empty field brings this back next time. A pushed scope's query
     // only means something inside that scope, so it is not kept.
     if (root.opened && root.scopeStack.length === 0) sources.rememberQuery(input.text)
@@ -166,7 +171,8 @@ Item {
         subtitle: root.rows[i].subtitle,
         primaryLabel: root.rows[i].primaryLabel,
         secondaryLabel: root.rows[i].secondaryLabel,
-        key: root.rows[i].key
+        key: root.rows[i].key,
+        accessory: root.rows[i].accessory
       })
     }
     var selected = selectedRow()
@@ -183,6 +189,11 @@ Item {
       pluginDir: root.pluginDir,
       actionsOpen: root.actionsOpen,
       ctrlHeld: root.ctrlHeld,
+      editing: root.editing ? root.editing.label : "",
+      notice: root.notice,
+      binds: sources.binds,
+      configDoc: sources.configDoc,
+      barButton: sources.barButton,
       actions: selected ? Model.rowActions(selected, sources.store).map(function(a) { return a.id + ":" + a.label }) : [],
       preview: root.previewState ? { kind: root.previewState.kind, text: root.previewText.slice(0, 400), source: root.previewState.source || "" } : null,
       cardWidth: card.width,
@@ -211,6 +222,7 @@ Item {
   // ---- Scopes
 
   function pushScope(next) {
+    root.editing = null
     var stack = root.scopeStack.slice()
     stack.push({ scope: next, query: input.text })
     root.scopeStack = stack
@@ -221,6 +233,7 @@ Item {
   }
 
   function popScope() {
+    root.editing = null
     if (root.scopeStack.length === 0) return
     var stack = root.scopeStack.slice()
     var top = stack.pop()
@@ -243,12 +256,13 @@ Item {
   }
 
   function scopeChipText() {
+    if (root.editing) return root.editing.label
     if (root.scope === "root") return ""
     if (root.scope.indexOf("menu:") === 0) {
       var id = root.scope.slice(5)
       return MenuModel.pathFor(sources.menuItems, id) || id
     }
-    return Model.scopeTitle(root.scope)
+    return Model.scopeTitle(root.scope, sources.configDoc)
   }
 
   // ---- Rebuild
@@ -268,7 +282,9 @@ Item {
     var rows = []
     var caps = ({})
 
-    if (parsed.scope === "clipboard") {
+    if (Model.isSettingsScope(parsed.scope)) {
+      rows = settingsRowsFor(parsed.scope, root.editing ? "" : parsed.rest)
+    } else if (parsed.scope === "clipboard") {
       rows = Model.clipboardRows(sources.clipboardEntries, parsed.rest)
     } else if (parsed.scope === "emoji") {
       rows = Model.emojiRows(sources.emojis, parsed.rest)
@@ -300,6 +316,28 @@ Item {
     }
 
     publish(Model.applyCaps(Model.sortRows(rows), caps))
+  }
+
+  function settingsRowsFor(scope, query) {
+    var parts = scope.split(":")
+    var doc = sources.configDoc
+    var ctx = {
+      config: sources.config,
+      binds: sources.binds,
+      handBound: Model.handBoundPalette(sources.keybindingRecords, sources.binds),
+      barButton: sources.barButton,
+      configPath: root.configPath,
+      scriptDir: sources.scriptDir
+    }
+    if (!parts[1]) return Model.settingsRows(doc, ctx, query)
+    if (parts[1] === "engine") return Model.settingsChoiceRows(sources.config, doc, query)
+    if (parts[1] === "builtins") return Model.settingsBuiltinRows(doc, query)
+    if (parts[1] === "scriptDirs") return Model.settingsDirRows(doc, sources.scriptDir, query)
+    if (Object.prototype.hasOwnProperty.call(Model.LIST_KINDS, parts[1])) {
+      return parts[2] === undefined ? Model.settingsListRows(doc, parts[1], query)
+        : Model.settingsEntryRows(doc, parts[1], parseInt(parts[2], 10), query)
+    }
+    return []
   }
 
   function rootRows(parsed, usage, now) {
@@ -381,7 +419,7 @@ Item {
       displayModel.append({
         section: rows[i].section,
         title: rows[i].title,
-        subtitle: rows[i].subtitle,
+        subtitle: root.editing && rows[i].key === root.editing.key ? input.text || "(empty)" : rows[i].subtitle,
         icon: rows[i].icon,
         iconSource: iconSourceFor(rows[i]),
         accessory: rows[i].accessory,
@@ -444,6 +482,7 @@ Item {
   }
 
   function selectFromPointer(index, item, mouse) {
+    if (root.editing) return
     if (typingGuard.running) return
     if (!pointerGate.moved(item, mouse)) return
     if (index < 0 || index >= root.rows.length) return
@@ -459,6 +498,7 @@ Item {
   }
 
   function activateItem(item, secondary) {
+    if (root.editing) return
     var payload = item.payload
     if ((payload.kind === "keybinding" || payload.kind === "reminder" || payload.kind === "script") && payload.disabled) return
 
@@ -480,6 +520,10 @@ Item {
       input.text = payload.insert
       input.cursorPosition = input.text.length
       rebuild()
+      return
+    }
+    if (payload.kind === "setting") {
+      runSetting(item, secondary ? payload.secondaryAction : payload.action)
       return
     }
     if ((payload.kind === "quicklink" || payload.kind === "snippet" || payload.kind === "command" || payload.kind === "script") && payload.complete) {
@@ -518,6 +562,85 @@ Item {
 
     if (item.frecencyKey) sources.recordUse(item.frecencyKey)
     run(item, payload, secondary === true)
+  }
+
+  // Settings stays in the palette; every text field borrows the search input.
+  function runSetting(item, action) {
+    if (!action || action.type === "none") return
+    root.pinnedKey = item.key
+    if (action.type === "push") {
+      pushScope(action.scope)
+    } else if (action.type === "config") {
+      sources.saveConfig(action.op)
+      if (action.pop) popScope()
+      else if (action.pushIndex) pushScope("settings:" + action.op.kind + ":" + (sources.configDoc[action.op.kind].length - 1))
+      else rebuild()
+    } else if (action.type === "barButton") {
+      sources.setBarButton(action.value)
+    } else if (action.type === "binds") {
+      sources.saveBinds(action.patch)
+      rebuild()
+    } else if (action.type === "editChord") {
+      beginEdit({
+        key: item.key, label: "Open palette", value: sources.binds.palette || "ALT + SPACE",
+        commit: function(text) {
+          var chord = Model.normalizeChord(text)
+          if (!chord) return { ok: false, error: "Not a key chord, e.g. ALT + SPACE or SUPER + SHIFT + P" }
+          sources.saveBinds({ palette: chord })
+          return { ok: true }
+        }
+      })
+    } else if (action.type === "editField") {
+      beginEdit({
+        key: item.key, label: action.label, value: action.value,
+        commit: function(text) {
+          var value = Model.validateField(action.kind, action.field, text)
+          if (!value.ok) return value
+          sources.saveConfig({ op: "setField", kind: action.kind, index: action.index, field: action.field, value: value.value })
+          return { ok: true }
+        }
+      })
+    } else if (action.type === "editDir") {
+      beginEdit({
+        key: item.key, label: action.index < 0 ? "Add folder" : "Script folder", value: action.value,
+        commit: function(text) {
+          var path = text.trim()
+          if (!path) return { ok: false, error: "Folder path is empty" }
+          sources.saveConfig(action.index < 0 ? { op: "addDir", path: path } : { op: "setDir", index: action.index, path: path })
+          return { ok: true }
+        }
+      })
+    }
+  }
+
+  function beginEdit(spec) {
+    closeActions()
+    root.editing = spec
+    root.pinnedKey = spec.key
+    input.text = spec.value
+    input.selectAll()
+    rebuild()
+  }
+
+  function commitEdit() {
+    var result = root.editing.commit(input.text)
+    if (!result.ok) { showNotice(result.error); return }
+    endEdit()
+  }
+
+  function cancelEdit() { endEdit() }
+
+  function endEdit() {
+    var key = root.editing.key
+    root.editing = null
+    input.text = ""
+    root.pinnedKey = key
+    rebuild()
+  }
+
+  function showNotice(text) {
+    root.notice = text
+    noticeTimer.restart()
   }
 
   // Everything here closes the palette first and defers the work by a turn:
@@ -864,6 +987,17 @@ Item {
     onCatalogChanged: if (root.opened) root.rebuild()
   }
 
+  Connections {
+    target: sources
+    function onNotice(text) { root.showNotice(text) }
+  }
+
+  Timer {
+    id: noticeTimer
+    interval: 3000
+    onTriggered: root.notice = ""
+  }
+
   ListModel { id: displayModel }
 
   PointerMoveGate {
@@ -1041,7 +1175,7 @@ Item {
             anchors.leftMargin: Style.spacing.md
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
-            maximumLength: 512
+            maximumLength: root.editing ? 2147483647 : 512
             font.family: root.fontFamily
             font.pixelSize: Style.font.title
             color: root.foreground
@@ -1062,10 +1196,11 @@ Item {
 
             onTextChanged: {
               root.confirmKey = ""
-              root.pinnedKey = ""
+              if (!root.editing) root.pinnedKey = ""
               root.closeActions()
               typingGuard.restart()
               root.rebuild()
+              if (root.editing) return
               var typedScope = Model.parseQuery(input.text, root.scope).scope
               if (typedScope === "files") fdDebounce.restart()
               else if (typedScope === "content") contentDebounce.restart()
@@ -1077,7 +1212,7 @@ Item {
               anchors.fill: parent
               verticalAlignment: Text.AlignVCenter
               visible: input.text.length === 0
-              text: Model.scopePlaceholder(root.scope)
+              text: root.editing ? "" : Model.scopePlaceholder(root.scope)
               font.family: root.fontFamily
               font.pixelSize: Style.font.title
               color: root.faintForeground
@@ -1297,7 +1432,7 @@ Item {
             textFormat: Text.PlainText
             anchors.left: parent.left
             anchors.verticalCenter: parent.verticalCenter
-            visible: root.confirmKey === ""
+            visible: root.confirmKey === "" && root.notice === ""
             text: root.rows.length === 1 ? "1 result" : root.rows.length + " results"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -1307,22 +1442,27 @@ Item {
           Text {
             textFormat: Text.PlainText
             anchors.left: parent.left
+            anchors.right: footerVerbs.left
+            anchors.rightMargin: Style.spacing.md
+            elide: Text.ElideRight
             anchors.verticalCenter: parent.verticalCenter
-            visible: root.confirmKey !== ""
-            text: "Press ↵ again to confirm  ·  Esc cancels"
+            visible: root.notice !== "" || root.confirmKey !== ""
+            text: root.notice || "Press ↵ again to confirm  ·  Esc cancels"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             color: Color.urgent
           }
 
           Text {
+            id: footerVerbs
             textFormat: Text.PlainText
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             visible: root.confirmKey === "" && root.selectedRow() !== null
             text: {
+              if (root.editing) return "Save  ↵     Cancel  Esc"
               var item = root.selectedRow()
-              if (!item) return ""
+              if (!item || !item.primaryLabel) return ""
               var primary = item.primaryLabel + "  ↵"
               var verbs = item.secondaryLabel ? primary + "     " + item.secondaryLabel + "  Ctrl+↵" : primary
               return verbs + "     Actions  Ctrl+K"
@@ -1473,6 +1613,18 @@ Item {
       return
     }
 
+    if (root.editing) {
+      if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) commitEdit()
+      else if (event.key === Qt.Key_Escape) cancelEdit()
+      else if ([Qt.Key_Tab, Qt.Key_Backtab, Qt.Key_Up, Qt.Key_Down, Qt.Key_PageUp, Qt.Key_PageDown].indexOf(event.key) >= 0
+        || (control && ([Qt.Key_K, Qt.Key_N, Qt.Key_P, Qt.Key_U, Qt.Key_Period].indexOf(event.key) >= 0
+          || (event.key >= Qt.Key_1 && event.key <= Qt.Key_9)))) {
+        // Keep navigation and palette commands out of the borrowed editor.
+      } else return
+      event.accepted = true
+      return
+    }
+
     // The actions panel takes navigation, Enter and Esc while it is open.
     // Anything else closes it and falls through, so typing still types.
     if (root.actionsOpen) {
@@ -1554,6 +1706,7 @@ Item {
   function completeSelection() {
     var item = selectedRow()
     if (!item) return
+    if (item.payload.kind === "setting") return
 
     if (item.payload.kind === "scope") {
       pushScope(item.payload.scope)

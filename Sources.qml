@@ -27,6 +27,8 @@ Item {
   readonly property var appLibrary: libraryLoader.item
 
   property var config: Model.normalizeConfig(null)
+  property var configDoc: Model.editableConfig(null)
+  property var barButton: null
   property var store: Model.normalizeState(null)
 
   property var menuItems: ({})
@@ -40,6 +42,10 @@ Item {
   property bool guardsPending: false
 
   property var keybindingRecords: []
+  readonly property string bindingsPath: root.home + "/.config/hypr/bindings.lua"
+  property var binds: ({ palette: "", clipboard: false, found: false })
+  property bool bindingsLoaded: false
+  property string bindsBackup: ""
   property var toplevels: []
   property var runningApps: ({})
   property var clipboardEntries: []
@@ -112,6 +118,35 @@ Item {
   property double openedAt: 0
 
   signal catalogChanged()
+  signal notice(string text)
+
+  function saveConfig(op) {
+    var next = Model.updateConfig(root.configDoc, op)
+    root.configDoc = next
+    root.config = Model.normalizeConfig(next)
+    root.catalogChanged()
+    configFile.setText(Model.serializeConfig(next))
+  }
+
+  function saveBinds(patch) {
+    if (!root.bindingsLoaded) { root.notice("~/.config/hypr/bindings.lua not found"); return }
+    var next = {
+      palette: patch.palette !== undefined ? patch.palette : root.binds.palette,
+      clipboard: patch.clipboard !== undefined ? patch.clipboard : root.binds.clipboard
+    }
+    var current = bindingsFile.text()
+    var out = Model.replaceBindBlock(current, Model.renderBindBlock(next))
+    if (out === null) { root.notice("bindings.lua has an OmaCast begin marker without an end marker; fix it by hand"); return }
+    root.bindsBackup = current
+    root.binds = { palette: next.palette, clipboard: next.clipboard, found: out.indexOf(Model.BIND_BEGIN) >= 0 }
+    bindingsFile.setText(out)
+    hyprReloadProc.running = true
+    root.catalogChanged()
+  }
+
+  function setBarButton(on) {
+    Quickshell.execDetached(["omarchy", "bar", "set", "io.github.terrifiedbug.omacast", "button", on ? "true" : "false", "--json"])
+  }
 
   function onOpen() {
     root.openedAt = Date.now()
@@ -618,10 +653,34 @@ Item {
     id: configFile
     path: root.home + "/.config/omarchy/omacast.json"
     watchChanges: true
+    atomicWrites: true
     printErrors: false
-    onLoaded: { root.config = Model.normalizeConfig(Model.parseConfig(text())); root.catalogChanged() }
+    onLoaded: {
+      var parsed = Model.parseConfig(text())
+      root.configDoc = Model.editableConfig(parsed)
+      root.config = Model.normalizeConfig(parsed)
+      root.catalogChanged()
+    }
     onFileChanged: reload()
-    onLoadFailed: { root.config = Model.normalizeConfig(null); root.catalogChanged() }
+    onLoadFailed: {
+      root.configDoc = Model.editableConfig(null)
+      root.config = Model.normalizeConfig(null)
+      root.catalogChanged()
+    }
+    onSaveFailed: function(error) { root.notice("Could not save omacast.json: " + error) }
+  }
+
+  FileView {
+    id: shellConfigFile
+    path: root.home + "/.config/omarchy/shell.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      root.barButton = Model.barButtonSetting(Model.parseJson(text()), "io.github.terrifiedbug.omacast")
+      root.catalogChanged()
+    }
+    onFileChanged: reload()
+    onLoadFailed: { root.barButton = null; root.catalogChanged() }
   }
 
   // ---- State
@@ -699,6 +758,47 @@ Item {
       root.reindexMenu()
       root.catalogChanged()
       if (root.guardsPending) Qt.callLater(function() { root.evaluateGuards() })
+    }
+  }
+
+  // ---- Hyprland bindings
+
+  FileView {
+    id: bindingsFile
+    path: root.bindingsPath
+    watchChanges: true
+    atomicWrites: true
+    // Reload must see the completed write, including a rejected-change restore.
+    blockWrites: true
+    printErrors: false
+    onLoaded: {
+      root.bindingsLoaded = true
+      root.binds = Model.parseBindBlock(text())
+      root.catalogChanged()
+    }
+    onFileChanged: reload()
+    onLoadFailed: {
+      root.bindingsLoaded = false
+      root.binds = { palette: "", clipboard: false, found: false }
+      root.catalogChanged()
+    }
+    onSaveFailed: function(error) { root.notice("Could not write bindings.lua: " + error) }
+  }
+
+  Process {
+    id: hyprReloadProc
+    command: ["bash", "-c", "hyprctl reload >/dev/null 2>&1; hyprctl configerrors"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var errors = text.trim()
+        if (!errors || errors === "ok") { bindsProc.running = true; return }
+        root.notice("Hyprland rejected the change, restored: " + errors.split("\n")[0])
+        bindingsFile.setText(root.bindsBackup)
+        root.binds = Model.parseBindBlock(root.bindsBackup)
+        root.catalogChanged()
+        Quickshell.execDetached(["hyprctl", "reload"])
+      }
     }
   }
 

@@ -388,16 +388,11 @@ test("the config accepts comments and trailing commas without touching strings",
   assert.equal(Model.parseConfig(""), null)
 })
 
-test("the config row is findable by what people call it", () => {
-  const path = "/home/x/.config/omarchy/omacast.json"
-  for (const query of ["config", "omacast config", "settings", "quicklinks", "snippets"]) {
-    const rows = Model.configRows(query, path)
-    assert.equal(rows.length, 1, query)
-    assert.equal(rows[0].payload.kind, "config")
-    assert.equal(rows[0].subtitle, path)
-    assert.equal(rows[0].primaryLabel, "Edit")
-  }
-  assert.deepEqual(Model.configRows("firefox", path), [])
+test("settings opens inside the palette and scripts still open their folder", () => {
+  const rows = Model.configRows("", "/config/omacast.json", "/scripts")
+  assert.deepEqual(rows.map((entry) => entry.payload), [
+    { kind: "scope", scope: "settings" }, { kind: "scriptsFolder", path: "/scripts" }
+  ])
 })
 
 test("a typed keyword sorts above rows from earlier sections", () => {
@@ -496,4 +491,103 @@ test("webRows need a real query and a configured engine", () => {
   assert.equal(Model.webRows("q", engine).length, 0)
   assert.equal(Model.webRows("quickshell", engine)[0].primaryLabel, "Search")
   assert.equal(Model.webRows("quickshell", null).length, 0)
+})
+
+test("editable config preserves future keys and aligns edits with valid entries", () => {
+  const raw = { quicklinks: [null, "bad", [], { name: "One", url: "https://one", extra: 9 }, { name: "Two" }], future: { values: [1] } }
+  const doc = Model.editableConfig(raw)
+  assert.deepEqual(doc.quicklinks, [
+    { name: "One", keyword: "", url: "https://one" },
+    { name: "Two", keyword: "", url: "" }
+  ])
+  doc.future.values.push(2)
+  assert.deepEqual(raw.future, { values: [1] })
+  const edited = Model.updateConfig(doc, { op: "setField", kind: "quicklinks", index: 1, field: "url", value: "https://two" })
+  const removed = Model.updateConfig(edited, { op: "remove", kind: "quicklinks", index: 0 })
+  assert.deepEqual(removed.quicklinks, [{ name: "Two", keyword: "", url: "https://two" }])
+  assert.equal(doc.quicklinks[1].url, "")
+  assert.deepEqual(JSON.parse(Model.serializeConfig(removed)).future, { values: [1, 2] })
+  assert.deepEqual(Object.keys(JSON.parse(Model.serializeConfig(removed))), [
+    "searchEngine", "builtinQuicklinks", "hiddenQuicklinks", "quicklinks", "snippets",
+    "commands", "scriptDirs", "preview", "currency", "ai", "future"
+  ])
+})
+
+test("single-line snippet edits preserve newlines and literal backslashes", () => {
+  const text = "line1\nline2\\n literal\\\\ end"
+  assert.equal(Model.unescapeMultiline(Model.escapeMultiline(text)), text)
+  assert.deepEqual(Model.validateField("snippets", "text", "line1\\nline2"), { ok: true, value: "line1\nline2" })
+  assert.equal(Model.validateField("quicklinks", "keyword", "Bad Keyword").ok, false)
+  assert.deepEqual(Model.validateField("quicklinks", "keyword", "GH"), { ok: true, value: "gh" })
+})
+
+test("chords accept only supported modifiers and a final key", () => {
+  assert.equal(Model.normalizeChord("alt+space"), "ALT + SPACE")
+  assert.equal(Model.normalizeChord("SUPER + CTRL"), "")
+  assert.equal(Model.normalizeChord('ALT + "SPACE"'), "")
+  assert.equal(Model.normalizeChord("ALT + F24"), "ALT + F24")
+  assert.equal(Model.normalizeChord("ALT + F25"), "")
+})
+
+test("settings filter preserves section order and toggles the editable defaults", () => {
+  const doc = Model.editableConfig(null)
+  const ctx = { config: Model.normalizeConfig(doc), binds: { palette: "", clipboard: false }, handBound: false, barButton: null, configPath: "/config", scriptDir: "/scripts" }
+  const rows = Model.settingsRows(doc, ctx, "")
+  assert.deepEqual([...new Set(rows.map((entry) => entry.section))], ["settingsGeneral", "settingsShortcuts", "settingsLibrary", "settingsAdvanced"])
+  const preview = rows.find((entry) => entry.title === "Preview pane")
+  assert.equal(preview.accessory, "On")
+  assert.equal(Model.updateConfig(doc, preview.payload.action.op).preview, false)
+  assert.equal(rows.find((entry) => entry.title === "Bar button").primaryLabel, "")
+  assert.deepEqual(Model.settingsRows(doc, ctx, "curr").map((entry) => entry.title), ["Currency rates"])
+})
+
+test("settings library indexes refer to the same editable entries through deletion", () => {
+  const doc = Model.editableConfig({ quicklinks: [null, { name: "One" }, { name: "Two" }], commands: [{ name: "Build", command: "make" }] })
+  const rows = Model.settingsListRows(doc, "quicklinks", "")
+  assert.deepEqual(rows.map((entry) => entry.payload.action.scope || entry.payload.action.op), [
+    "settings:quicklinks:0", "settings:quicklinks:1", { op: "add", kind: "quicklinks" }
+  ])
+  const second = Model.settingsEntryRows(doc, "quicklinks", 1, "")
+  assert.deepEqual(second.at(-1).payload.action.op, { op: "remove", kind: "quicklinks", index: 1 })
+  assert.equal(second.at(-1).confirm, true)
+  assert.equal(Model.updateConfig(doc, second.at(-1).payload.action.op).quicklinks[0].name, "One")
+  assert.deepEqual(Model.settingsEntryRows(doc, "quicklinks", 9, ""), [])
+  const command = Model.settingsEntryRows(doc, "commands", 0, "")
+  assert.equal(command.length, 6)
+  assert.equal(Model.updateConfig(doc, command[3].payload.action.op).commands[0].terminal, true)
+})
+
+test("owned bindings render Lua commands and round-trip both shortcuts", () => {
+  const block = Model.renderBindBlock({ palette: "ALT + SPACE", clipboard: true })
+  assert.equal(block, '\n-- omacast: begin. Written by OmaCast settings; remove the block whole to undo.\n'
+    + 'o.rebind("ALT + SPACE", "OmaCast", "omarchy-shell shell toggle io.github.terrifiedbug.omacast \'{}\'")\n'
+    + 'o.rebind("SUPER + CTRL + V", "OmaCast clipboard", "omarchy-shell shell toggle io.github.terrifiedbug.omacast \'{\\"scope\\":\\"clipboard\\"}\'")\n'
+    + '-- omacast: end.\n')
+  assert.deepEqual(Model.parseBindBlock(block), { palette: "ALT + SPACE", clipboard: true, found: true })
+  assert.equal(Model.renderBindBlock({ palette: "", clipboard: false }), "")
+})
+
+test("owned bindings replace or remove only full-line marked blocks", () => {
+  const first = Model.renderBindBlock({ palette: "ALT + SPACE", clipboard: false })
+  const next = Model.renderBindBlock({ palette: "", clipboard: true })
+  const appended = Model.replaceBindBlock("-- stock", first)
+  assert.equal(appended, "-- stock\n" + first)
+  const surrounded = "-- before\n" + first + "-- flea block\n"
+  assert.equal(Model.replaceBindBlock(surrounded, next), "-- before\n" + next + "-- flea block\n")
+  assert.equal(Model.replaceBindBlock(surrounded, ""), "-- before\n-- flea block\n")
+  assert.equal(Model.replaceBindBlock("-- before\n" + Model.BIND_BEGIN + "\n", next), null)
+  const quoted = 'print("' + Model.BIND_BEGIN + '")\n'
+  assert.deepEqual(Model.parseBindBlock(quoted), { palette: "", clipboard: false, found: false })
+  assert.equal(Model.replaceBindBlock(quoted, ""), quoted)
+  assert.equal(Model.replaceBindBlock(quoted, next), quoted + next)
+})
+
+test("bar button distinguishes a missing slot from a disabled button", () => {
+  const id = "io.github.terrifiedbug.omacast"
+  assert.equal(Model.barButtonSetting(null, id), null)
+  assert.equal(Model.barButtonSetting({ bar: { layout: { right: [{ id: "other", button: true }] } } }, id), null)
+  assert.equal(Model.barButtonSetting({ bar: { layout: { left: [{ id }] } } }, id), false)
+  assert.equal(Model.barButtonSetting({ bar: { layout: { center: [{ id, button: true }] } } }, id), true)
+  assert.equal(Model.barButtonSetting({ bar: { layout: { right: [{ id, button: "true" }] } } }, id), true)
+  assert.equal(Model.barButtonSetting({ bar: { layout: { right: [{ id, button: "false" }] } } }, id), false)
 })

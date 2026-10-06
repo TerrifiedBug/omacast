@@ -1,8 +1,8 @@
 {
-  // OmaCast config. The palette's "OmaCast Config" row copies this file to
-  // ~/.config/omarchy/omacast.json and opens it. As shipped it changes nothing:
-  // fill in the empty lists to add your own entries. Comments and trailing
-  // commas are fine, and edits apply as soon as you save.
+  // Settings > Advanced > Edit config file creates ~/.config/omarchy/omacast.json
+  // from this example and opens it. Edit entries here or in the palette.
+  // Hand edits accept comments and trailing commas and apply as soon as you save.
+  // In-palette Settings saves plain JSON each time, dropping comments.
 
   // Keyword of the quicklink used for the web fallback row.
   // Built-ins: g (Google), ddg, yt, gh, aw (Arch Wiki), aur, w (Wikipedia).
