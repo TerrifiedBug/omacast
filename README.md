@@ -91,7 +91,7 @@ rm ~/.cache/omarchy/omacast-rates.xml           # currency rates, if you turned 
 | `gh quickshell` | A quicklink, opened in your browser |
 | `cb ssh` | Clipboard history, pasted or copied |
 | `:smile` | Emoji, typed into the focused window |
-| `f invoice`, `~/coding/` | File search through `fd`, opened with `gio` |
+| `f project invoice`, `~/coding/` | File and folder search through `fd`, opened with `gio` |
 | `#TODO` | Files whose contents match, through `rg` |
 | `win chrome` | Open windows, the full list, with switch and close |
 | `kill firefox` | Your own processes by CPU use. Enter twice terminates, Ctrl+Enter twice kills |
@@ -110,6 +110,43 @@ On a screen at least 1400 px wide, a preview pane opens beside the list when
 the selected row has something to show: the head of a text file, an image, the
 matching lines of a content search, the full clipboard entry, a snippet with
 today's date filled in, or the command a row runs.
+The whole card stays horizontally centered, including the preview pane.
+
+## File search
+
+`f project invoice` finds `project/invoice.txt` as well as
+`project-invoice.txt`. Every term must appear somewhere in the full path,
+in any order. Terms are literal and case insensitive. Relevance uses every
+term and favours matches in the filename, with smaller penalties for depth
+and hidden paths.
+
+The controls above the results cycle through file types, sort order and
+the display limit. Click to go forward; right-click or hold Shift with
+the keyboard shortcut to go back.
+
+| Key, in Files | Control |
+|---|---|
+| `Ctrl+F` | All, Folders, Documents, Images, Videos, Audio, Code |
+| `Ctrl+S` | Relevance, Newest, Oldest, Name A-Z, Name Z-A |
+| `Ctrl+L` | 20, 40, 60, 100 or 200 displayed results |
+
+The display limit starts at 60. These choices stay in memory when you close
+the palette. File types use filename extensions; Code also includes
+`Dockerfile`, `Makefile`, `Containerfile` and `Justfile`. Tab still completes
+the selected row.
+
+`f ` and paths ending in `/` browse one level. Adding a term searches
+recursively in that directory, or in your home directory for `f …`.
+Searches respect ignore files and skip `.git`, `node_modules` and `.cache`.
+
+Each walk collects up to 500 candidates and stops after three seconds.
+Matches found before a timeout are kept. A separate metadata batch has a
+one-second limit. Sorting happens before the display limit, but after the
+scan cap, so a broad search can leave files out. The footer shows how many
+matches are displayed and flags a reached scan cap.
+
+`#TODO` still searches file contents with ripgrep. Its matching-line previews
+and result order are independent of the Files controls.
 
 ## Keys
 
@@ -284,7 +321,7 @@ Everything here ships with Omarchy.
 | `wtype`, `wl-clipboard` | Pasting clipboard entries, snippets and emoji |
 | `jq` | Used by the stock clipboard helpers OmaCast calls |
 | `ps`, `kill` (procps) | The `kill ` scope |
-| `date` (coreutils) | Time zone answers |
+| `date`, `stat` (coreutils) | Time zone answers and file metadata |
 | `curl` | Currency rates, only when turned on |
 | `bash` | Menu actions, guards, keybinding dispatch, scripts |
 

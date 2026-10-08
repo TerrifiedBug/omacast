@@ -1095,6 +1095,81 @@ function emojiRows(emojis, query) {
 }
 
 // ---- Files
+var FILE_LIMITS = [20, 40, 60, 100, 200]
+var FILE_CANDIDATE_LIMIT = 500
+var FILE_FILTERS = [
+  { id: "all", label: "All" },
+  { id: "folders", label: "Folders" },
+  { id: "documents", label: "Documents", extensions: ["txt", "md", "markdown", "rst", "pdf", "odt", "ods", "odp", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "rtf", "csv", "epub"] },
+  { id: "images", label: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "heic", "heif", "tif", "tiff", "ico"] },
+  { id: "videos", label: "Videos", extensions: ["mp4", "mkv", "webm", "mov", "avi", "m4v", "mpeg", "mpg", "wmv", "flv"] },
+  { id: "audio", label: "Audio", extensions: ["mp3", "flac", "wav", "ogg", "opus", "m4a", "aac", "aiff", "wma"] },
+  { id: "code", label: "Code", extensions: ["js", "jsx", "ts", "tsx", "mjs", "cjs", "json", "jsonc", "qml", "py", "rs", "go", "c", "h", "cc", "cpp", "cxx", "hpp", "cs", "java", "kt", "kts", "swift", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "html", "css", "scss", "sass", "less", "vue", "svelte", "sql", "yaml", "yml", "toml", "xml", "ini", "conf", "cmake", "nix", "ex", "exs", "erl", "hrl", "hs", "pl", "r", "dart", "ipynb"], names: ["Dockerfile", "Makefile", "Containerfile", "Justfile"] }
+]
+var FILE_SORTS = [
+  { id: "relevance", label: "Relevance" },
+  { id: "newest", label: "Newest" },
+  { id: "oldest", label: "Oldest" },
+  { id: "nameAsc", label: "Name A–Z" },
+  { id: "nameDesc", label: "Name Z–A" }
+]
+
+function fileCommand(dir, terms, filter) {
+  var selected = FILE_FILTERS[0]
+  for (var f = 0; f < FILE_FILTERS.length; f++) {
+    if (FILE_FILTERS[f].id === filter) { selected = FILE_FILTERS[f]; break }
+  }
+  var command = ["fd", "--ignore-case", "--hidden", "--follow", "--one-file-system",
+    "--exclude", ".git", "--exclude", "node_modules", "--exclude", ".cache",
+    "--max-results", String(FILE_CANDIDATE_LIMIT), "--threads", "2",
+    "--absolute-path", "--color", "never", "--full-path"]
+  command.push("--type", selected.id === "folders" ? "d" : "f")
+  if (selected.id === "all") command.push("--type", "d")
+
+  var values = (terms || []).filter(function(value) { return String(value || "") !== "" })
+  if (!values.length) command.push("--max-depth", "1")
+  if (selected.id === "code") {
+    // fd's fixed-string flag covers every pattern. Escape user terms when
+    // the filename predicate needs regex, so they still mean literal text.
+    var names = selected.names.map(function(name) { return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") })
+    command.push("--and=(?:^|/)(?:[^/]+\\.(?:" + selected.extensions.join("|") + ")|" + names.join("|") + ")$")
+    for (var c = 0; c < values.length; c++) command.push("--and=" + String(values[c]).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+  } else {
+    command.push("--fixed-strings")
+    if (selected.extensions) {
+      for (var e = 0; e < selected.extensions.length; e++) command.push("--extension", selected.extensions[e])
+    }
+    for (var t = 0; t < values.length; t++) command.push("--and=" + String(values[t]))
+  }
+  command.push("--search-path", String(dir || ""), "")
+  return command
+}
+
+function fileStatCommand(paths) {
+  return ["stat", "--dereference", "--printf", "%Y\t%f\t%n\n", "--"].concat(paths)
+}
+
+function parseFileRecords(text) {
+  var lines = String(text || "").split("\n")
+  var paths = []
+  var mtimes = ({})
+  for (var i = 0; i < lines.length; i++) {
+    var first = lines[i].indexOf("\t")
+    var second = lines[i].indexOf("\t", first + 1)
+    if (first < 1 || second < 0) continue
+    var seconds = Number(lines[i].slice(0, first))
+    var modeText = lines[i].slice(first + 1, second)
+    if (!isFinite(seconds) || !/^[0-9a-f]+$/i.test(modeText)) continue
+    var path = lines[i].slice(second + 1)
+    if (path.charAt(0) !== "/") continue
+    if (path.length > 1) path = path.replace(/\/+$/, "")
+    var isDir = (parseInt(modeText, 16) & 0xf000) === 0x4000
+    paths.push(isDir && path !== "/" ? path + "/" : path)
+    mtimes[path] = seconds * 1000
+  }
+  return { paths: paths, mtimes: mtimes }
+}
+
 
 function basename(path) {
   var value = String(path || "")
@@ -1117,26 +1192,38 @@ function shortenHome(path, home) {
 }
 
 function rankFile(path, query) {
-  var name = lower(basename(path))
-  var full = lower(path)
-  var q = lower(query).trim()
-  var score
-
-  if (!q) score = 4000
-  else if (name.indexOf(q) === 0) score = 5000
-  else if (name.indexOf(q) >= 0) score = 4000
-  else if (full.indexOf(q) >= 0) score = 3000
-  else score = 2000
-
-  var depth = String(path || "").split("/").length - 1
-  score -= 150 * depth
-  if (name.charAt(0) === ".") score -= 500
-
-  var segments = String(path || "").split("/")
-  for (var i = 1; i < segments.length - 1; i++) {
-    if (segments[i].charAt(0) === ".") { score -= 1500; break }
+  var normalized = String(path || "").replace(/\/+$/, "")
+  var name = lower(basename(normalized))
+  var full = lower(normalized)
+  var terms = lower(query).trim().split(/\s+/).filter(function(term) { return term !== "" })
+  var minimum = 5
+  var total = 0
+  for (var t = 0; t < terms.length; t++) {
+    var term = terms[t]
+    var at = name.indexOf(term)
+    var tier = 1
+    if (at < 0 && full.indexOf(term) < 0) return -1
+    if (name === term) tier = 5
+    else if (at === 0) tier = 4
+    else if (at >= 0) {
+      tier = 2
+      while (at >= 0) {
+        if (/[^a-z0-9]/.test(name.charAt(at - 1))) { tier = 3; break }
+        at = name.indexOf(term, at + 1)
+      }
+    }
+    minimum = Math.min(minimum, tier)
+    total += tier
   }
-  return score
+
+  var segments = normalized.split("/")
+  var penalty = 150 * segments.length
+  if (name.charAt(0) === ".") penalty += 500
+  for (var i = 1; i < segments.length - 1; i++) {
+    if (segments[i].charAt(0) === ".") { penalty += 1500; break }
+  }
+  // Bounded preferences never push a basename match below a path-only tier.
+  return minimum * 1000000 + (terms.length ? total / terms.length * 10000 : 0) - Math.min(penalty, 9999)
 }
 
 var PREVIEW_LIMIT = 16384
@@ -1156,9 +1243,10 @@ function filePreview(path, isDir, term) {
 // an empty basename. Strip it and remember the row is a folder; the preview
 // and Terminal here still check the disk, for paths that arrive without one.
 // `term` is set for content search, whose preview is the match, not the head.
-function fileRows(paths, query, home, term) {
+function fileRows(paths, query, home, term, options) {
   var values = paths || []
   var out = []
+  var settings = options || ({})
 
   for (var i = 0; i < values.length; i++) {
     var raw = String(values[i] || "")
@@ -1166,6 +1254,8 @@ function fileRows(paths, query, home, term) {
     var isDir = raw.length > 1 && raw.charAt(raw.length - 1) === "/"
     var path = raw.length > 1 ? raw.replace(/\/+$/, "") : raw
     if (!path) path = "/"
+    var score = term ? -i : rankFile(path, query)
+    if (!term && score < 0) continue
 
     out.push(row({
       key: "file:" + path,
@@ -1175,10 +1265,28 @@ function fileRows(paths, query, home, term) {
       icon: isDir ? ICON_FOLDER : ICON_FILE,
       primaryLabel: "Open",
       secondaryLabel: "Show in folder",
-      score: term ? -i : rankFile(path, query),
+      score: score,
       order: i,
       payload: { kind: "file", path: path, dir: dirname(path), isDir: isDir, preview: filePreview(path, isDir, term || "") }
     }))
+  }
+  if (!term && settings.sort && settings.sort !== "relevance") {
+    var mtimes = settings.mtimes || ({})
+    out.sort(function(a, b) {
+      if (settings.sort === "newest" || settings.sort === "oldest") {
+        var delta = (mtimes[a.payload.path] || 0) - (mtimes[b.payload.path] || 0)
+        if (delta) return settings.sort === "newest" ? -delta : delta
+      }
+      var an = lower(a.title)
+      var bn = lower(b.title)
+      var names = an < bn ? -1 : (an > bn ? 1 : 0)
+      if (!names) names = a.payload.path < b.payload.path ? -1 : (a.payload.path > b.payload.path ? 1 : 0)
+      return settings.sort === "nameDesc" ? -names : names
+    })
+    for (var s = 0; s < out.length; s++) {
+      out[s].score = -s
+      out[s].order = s
+    }
   }
   return out
 }
@@ -3538,6 +3646,13 @@ if (typeof module !== "undefined") {
     clipboardRows: clipboardRows,
     parseEmojis: parseEmojis,
     emojiRows: emojiRows,
+    FILE_FILTERS: FILE_FILTERS,
+    FILE_SORTS: FILE_SORTS,
+    FILE_LIMITS: FILE_LIMITS,
+    FILE_CANDIDATE_LIMIT: FILE_CANDIDATE_LIMIT,
+    fileCommand: fileCommand,
+    fileStatCommand: fileStatCommand,
+    parseFileRecords: parseFileRecords,
     fileRows: fileRows,
     rankFile: rankFile,
     basename: basename,

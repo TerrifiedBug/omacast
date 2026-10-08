@@ -1,5 +1,9 @@
 const test = require("node:test")
 const assert = require("node:assert/strict")
+const fs = require("node:fs")
+const os = require("node:os")
+const path = require("node:path")
+const { execFileSync } = require("node:child_process")
 const Model = require("../Model.js")
 const MenuModel = require("../vendor/MenuModel.js")
 
@@ -295,30 +299,181 @@ test("fileRequest browses a directory when the query ends in a slash", () => {
   assert.deepEqual(Model.fileRequest(parsed, "/home/x"), { dir: "/home/x/coding", terms: [] })
 })
 
-test("fileRows rank by basename tier first, then depth and hidden penalties", () => {
-  const rows = Model.sortRows(Model.fileRows([
-    "/home/x/notes.md",
-    "/home/x/deep/nested/notes.md",
-    "/home/x/.cache/notes.md",
-    "/home/x/release-notes.md"
-  ], "notes", "/home/x"))
-
+test("file relevance requires every literal term and ignores term order", () => {
+  const paths = [
+    "/home/x/project/notes.md",
+    "/home/x/project-notes.md",
+    "/home/x/project/archive.txt",
+    "/home/x/notes/project.txt",
+    "/home/x/other/notes.md"
+  ]
+  const rows = Model.sortRows(Model.fileRows(paths, "project notes", "/home/x"))
   assert.deepEqual(rows.map((r) => r.payload.path), [
-    "/home/x/notes.md",
-    "/home/x/deep/nested/notes.md",
-    "/home/x/release-notes.md",
-    "/home/x/.cache/notes.md"
+    "/home/x/project-notes.md",
+    "/home/x/project/notes.md",
+    "/home/x/notes/project.txt"
   ])
-  assert.equal(rows[0].subtitle, "~")
-  assert.ok(Model.rankFile("/home/x/notes.md", "notes") > Model.rankFile("/home/x/.cache/notes.md", "notes"))
+  assert.deepEqual(
+    Model.sortRows(Model.fileRows(paths, "notes project", "/home/x")),
+    rows
+  )
+  assert.ok(Model.rankFile("/home/x/project/archive.txt", "project notes") < 0)
+  assert.ok(Model.rankFile("/home/x/café.txt", "cafe") < 0)
+  assert.ok(Model.rankFile("/home/x/project/notes.md", "ntes") < 0)
 })
 
-test("a directory printed by fd with a trailing slash keeps its name", () => {
-  const rows = Model.fileRows(["/home/x/coding/"], "", "/home/x")
+test("basename exact, prefix, boundary and contains tiers beat parent matches", () => {
+  const paths = [
+    "/home/x/notes/archive.txt",
+    "/home/x/deep/.hidden/notes",
+    "/home/x/.hidden/notes.md",
+    "/home/x/.hidden/release-notes.md",
+    "/home/x/releasenotes.md"
+  ]
+  const rows = Model.sortRows(Model.fileRows(paths, "notes", "/home/x"))
+  assert.deepEqual(rows.map((r) => r.payload.path), [
+    "/home/x/deep/.hidden/notes",
+    "/home/x/.hidden/notes.md",
+    "/home/x/.hidden/release-notes.md",
+    "/home/x/releasenotes.md",
+    "/home/x/notes/archive.txt"
+  ])
+  assert.ok(Model.rankFile("/home/x/notes.md", "notes") > Model.rankFile("/home/x/.hidden/notes.md", "notes"))
+  assert.ok(Model.rankFile("/home/x/notes.md", "notes") > Model.rankFile("/home/x/deep/notes.md", "notes"))
+})
 
-  assert.equal(rows[0].title, "coding")
-  assert.equal(rows[0].subtitle, "~")
-  assert.equal(rows[0].payload.path, "/home/x/coding")
+function fileFixture(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "omacast-files-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.writeFileSync(path.join(root, ".ignore"), "ignored/\nignored.txt\n")
+  return root
+}
+
+function discoverFiles(root, terms, filter) {
+  const [command, ...args] = Model.fileCommand(root, terms, filter)
+  const paths = execFileSync(command, args, { cwd: root, encoding: "utf8" }).split("\n").filter(Boolean)
+  if (!paths.length) return { paths: [], mtimes: {} }
+  const [stat, ...statArgs] = Model.fileStatCommand(paths)
+  return Model.parseFileRecords(execFileSync(stat, statArgs, { encoding: "utf8" }))
+}
+
+test("fd discovers literal terms across parent and basename without changing ignores", (t) => {
+  const root = fileFixture(t)
+  for (const folder of ["project", "ignored", ".git", "node_modules", ".cache"]) {
+    fs.mkdirSync(path.join(root, folder))
+    fs.writeFileSync(path.join(root, folder, "NOTES.md"), "")
+  }
+  fs.writeFileSync(path.join(root, "project", "archive.txt"), "")
+  fs.writeFileSync(path.join(root, "ignored.txt"), "")
+  fs.writeFileSync(path.join(root, ".hidden.txt"), "")
+  const expected = path.join(root, "project", "NOTES.md")
+  const records = discoverFiles(root, ["PROJECT", "notes"], "all")
+  assert.deepEqual(records.paths, [expected])
+  assert.deepEqual(discoverFiles(root, ["notes", "PROJECT"], "all").paths, [expected])
+  assert.equal(typeof records.mtimes[expected], "number")
+  const all = discoverFiles(root, [root], "all").paths
+  assert.ok(all.includes(path.join(root, ".hidden.txt")))
+  assert.ok(!all.some((p) => /\/(?:ignored|\.git|node_modules|\.cache)(?:\/|\.txt$)/.test(p)))
+  assert.ok(!discoverFiles(root, ["NOTES.*"], "all").paths.length)
+})
+
+test("empty discovery browses one level and directory metadata preserves row actions", (t) => {
+  const root = fileFixture(t)
+  const folder = path.join(root, ".folder")
+  fs.mkdirSync(folder)
+  fs.writeFileSync(path.join(folder, "nested.txt"), "")
+  fs.symlinkSync(folder, path.join(root, "folder-link"))
+  const records = discoverFiles(root, [], "folders")
+  assert.deepEqual(records.paths.slice().sort(), [folder + "/", path.join(root, "folder-link") + "/"].sort())
+  const rows = Model.fileRows(records.paths, "", root, "", { sort: "newest", mtimes: records.mtimes })
+  for (const row of rows) {
+    assert.equal(row.title, path.basename(row.payload.path))
+    assert.equal(row.subtitle, "~")
+    assert.equal(row.payload.isDir, true)
+    assert.equal(row.payload.preview, null)
+    assert.ok(Number.isFinite(records.mtimes[row.payload.path]))
+    assert.deepEqual(Model.rowActions(row, {}).map((a) => a.id), ["primary", "secondary", "copy-path", "terminal-here", "reveal"])
+  }
+})
+
+test("file records preserve spaces and tabs and read locale-independent hex modes", () => {
+  const records = Model.parseFileRecords(
+    "1700000000\t81a4\t/home/x/a file\twith tabs.txt\n" +
+    "1700000001\t41ED\t/home/x/a folder/\n" +
+    "bad\t81a4\t/home/x/bad.txt\n" +
+    "1700000000\tnot-hex\t/home/x/bad.txt\n" +
+    "1700000000\t81a4\trelative.txt\n"
+  )
+  assert.deepEqual(records, {
+    paths: ["/home/x/a file\twith tabs.txt", "/home/x/a folder/"],
+    mtimes: { "/home/x/a file\twith tabs.txt": 1700000000000, "/home/x/a folder": 1700000001000 }
+  })
+})
+
+test("file filter choices discover only their types including extensionless code", (t) => {
+  const root = fileFixture(t)
+  const groups = {
+    documents: ["report.PDF", "notes.md"],
+    images: ["photo.JPG", "drawing.svg"],
+    videos: ["movie.mp4", "clip.webm"],
+    audio: ["track.flac", "recording.mp3"],
+    code: ["app.ts", "view.qml", "Dockerfile", "Makefile", "Containerfile", "Justfile"]
+  }
+  for (const names of Object.values(groups)) {
+    for (const name of names) fs.writeFileSync(path.join(root, name), "")
+  }
+  fs.mkdirSync(path.join(root, "photo.png"))
+  fs.writeFileSync(path.join(root, "unrecognized.bin"), "")
+  assert.deepEqual(Model.FILE_FILTERS.map((f) => f.id), ["all", "folders", "documents", "images", "videos", "audio", "code"])
+  for (const [filter, names] of Object.entries(groups)) {
+    assert.deepEqual(discoverFiles(root, [], filter).paths.slice().sort(), names.map((name) => path.join(root, name)).sort())
+  }
+  const unusual = path.join(root, "project.[x]")
+  fs.mkdirSync(unusual)
+  fs.writeFileSync(path.join(unusual, "Dockerfile"), "")
+  fs.mkdirSync(path.join(root, "project.ax"))
+  fs.writeFileSync(path.join(root, "project.ax", "Dockerfile"), "")
+  assert.deepEqual(discoverFiles(root, ["project.[x]", "docker"], "code").paths, [path.join(unusual, "Dockerfile")])
+})
+
+test("type filtering happens before the 500-candidate discovery limit", (t) => {
+  const root = fileFixture(t)
+  for (let i = 0; i < 520; i++) fs.writeFileSync(path.join(root, "document-" + i + ".txt"), "")
+  for (let i = 0; i < 3; i++) fs.writeFileSync(path.join(root, "image-" + i + ".png"), "")
+  assert.equal(discoverFiles(root, [], "images").paths.length, 3)
+  assert.equal(discoverFiles(root, [], "documents").paths.length, Model.FILE_CANDIDATE_LIMIT)
+  assert.deepEqual(Model.FILE_LIMITS, [20, 40, 60, 100, 200])
+})
+
+test("date sorting considers every discovered candidate before the display cap", (t) => {
+  const root = fileFixture(t)
+  for (let i = 0; i < 75; i++) {
+    const file = path.join(root, "document-" + String(i).padStart(2, "0") + ".txt")
+    fs.writeFileSync(file, "")
+    fs.utimesSync(file, 1700000000 + i, 1700000000 + i)
+  }
+  const records = discoverFiles(root, [], "documents")
+  assert.equal(records.paths.length, 75)
+  for (const sort of ["newest", "oldest"]) {
+    const rows = Model.applyCaps(Model.sortRows(Model.fileRows(records.paths, "", root, "", { sort, mtimes: records.mtimes })), { files: 60 })
+    const expected = Array.from({ length: 75 }, (_, i) => "document-" + String(i).padStart(2, "0") + ".txt")
+    if (sort === "newest") expected.reverse()
+    assert.deepEqual(rows.map((r) => r.title), expected.slice(0, 60))
+  }
+})
+
+test("name sorting survives sortRows and content mode retains ripgrep order", () => {
+  const paths = ["/x/zeta.txt", "/x/Beta.txt", "/x/alpha.txt"]
+  assert.deepEqual(Model.FILE_SORTS.map((s) => s.id), ["relevance", "newest", "oldest", "nameAsc", "nameDesc"])
+  for (const [sort, expected] of [
+    ["nameAsc", ["alpha.txt", "Beta.txt", "zeta.txt"]],
+    ["nameDesc", ["zeta.txt", "Beta.txt", "alpha.txt"]]
+  ]) {
+    assert.deepEqual(Model.sortRows(Model.fileRows(paths, "", "/x", "", { sort })).map((r) => r.title), expected)
+  }
+  const content = Model.sortRows(Model.fileRows(paths, "not in any filename", "/x", "TODO", { sort: "nameAsc", mtimes: { "/x/alpha.txt": 999 } }))
+  assert.deepEqual(content.map((r) => r.payload.path), paths)
+  assert.ok(content.every((r) => r.payload.preview.type === "content" && r.payload.preview.term === "TODO"))
 })
 
 test("? opens the cheat sheet, which lists prefixes and configured keywords", () => {

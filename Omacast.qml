@@ -43,6 +43,11 @@ Item {
   property bool ctrlHeld: false
   property var scopeStack: []
   property string lastEffectiveScope: "root"
+  property string fileFilter: "all"
+  property string fileSort: "relevance"
+  property int fileLimit: 60
+  property int fileMatchCount: 0
+  readonly property bool filesActive: !root.editing && Model.parseQuery(input.text, root.scope).scope === "files"
   // Ctrl+K: the selected row's actions, captured when the panel opens so a
   // late landing cannot swap them under the user.
   property bool actionsOpen: false
@@ -198,7 +203,13 @@ Item {
       actions: selected ? Model.rowActions(selected, sources.store).map(function(a) { return a.id + ":" + a.label }) : [],
       preview: root.previewState ? { kind: root.previewState.kind, text: root.previewText.slice(0, 400), source: root.previewState.source || "" } : null,
       cardWidth: card.width,
+      cardX: card.x,
+      screenWidth: panel.width,
       scripts: sources.scripts.length,
+      fileSearch: {
+        active: root.filesActive, filter: root.fileFilter, sort: root.fileSort, limit: root.fileLimit,
+        candidates: sources.filePaths.length, matches: root.fileMatchCount, searching: sources.fileSearching
+      },
       rows: out
     })
   }
@@ -249,11 +260,56 @@ Item {
   // so paste indices are fresh, the emoji table is parsed once, and fd starts.
   // Inline prefixes (`cb `, `:`, `~/`) enter the same way a pushed scope does.
   function enterScope(next) {
+    if (next !== "files") {
+      fdDebounce.stop()
+      sources.cancelFiles()
+    }
     sources.wantProcesses(next === "kill")
     if (next === "clipboard") sources.loadClipboard()
     else if (next === "emoji") sources.wantEmojis()
     else if (next === "files") { sources.clearFiles(); fdDebounce.restart() }
     else if (next === "content") contentDebounce.restart()
+  }
+
+  // File controls keep the query and its focus; only a type change needs a
+  // fresh walk. Sorting and limit changes reuse the complete candidate set.
+  function cycleFileFilter(direction): string {
+    if (!root.filesActive) return "not in Files"
+    var index = Model.FILE_FILTERS.map(function(f) { return f.id }).indexOf(root.fileFilter)
+    var step = Number(direction) < 0 ? -1 : 1
+    root.fileFilter = Model.FILE_FILTERS[(index + step + Model.FILE_FILTERS.length) % Model.FILE_FILTERS.length].id
+    root.pinnedKey = ""
+    root.confirmKey = ""
+    closeActions()
+    sources.cancelFiles()
+    sources.clearFiles()
+    rebuild()
+    fdDebounce.restart()
+    input.forceActiveFocus()
+    return root.fileFilter
+  }
+
+  function cycleFileSort(direction): string {
+    if (!root.filesActive) return "not in Files"
+    var index = Model.FILE_SORTS.map(function(s) { return s.id }).indexOf(root.fileSort)
+    var step = Number(direction) < 0 ? -1 : 1
+    root.fileSort = Model.FILE_SORTS[(index + step + Model.FILE_SORTS.length) % Model.FILE_SORTS.length].id
+    root.pinnedKey = ""
+    root.confirmKey = ""
+    closeActions()
+    rebuild()
+    input.forceActiveFocus()
+    return root.fileSort
+  }
+
+  function cycleFileLimit(direction): string {
+    if (!root.filesActive) return "not in Files"
+    var index = Model.FILE_LIMITS.indexOf(root.fileLimit)
+    var step = Number(direction) < 0 ? -1 : 1
+    root.fileLimit = Model.FILE_LIMITS[(index + step + Model.FILE_LIMITS.length) % Model.FILE_LIMITS.length]
+    rebuild()
+    input.forceActiveFocus()
+    return String(root.fileLimit)
   }
 
   function scopeChipText() {
@@ -291,7 +347,9 @@ Item {
       rows = Model.emojiRows(sources.emojis, parsed.rest)
     } else if (parsed.scope === "files") {
       var request = Model.fileRequest(parsed, root.home)
-      rows = Model.fileRows(sources.filePaths, request.terms.length > 0 ? request.terms[0] : "", root.home)
+      rows = Model.fileRows(sources.filePaths, request.terms.join(" "), root.home, "", { sort: root.fileSort, mtimes: sources.fileMtimes })
+      root.fileMatchCount = rows.length
+      caps = { files: root.fileLimit }
     } else if (parsed.scope === "content") {
       // The last landing stays up while the next rg runs, tagged with the
       // term it matched so the preview greps for the right thing.
@@ -1027,7 +1085,7 @@ Item {
       var parsed = Model.parseQuery(input.text, root.scope)
       if (parsed.scope !== "files") return
       var request = Model.fileRequest(parsed, root.home)
-      sources.searchFiles(request.dir, request.terms)
+      sources.searchFiles(request.dir, request.terms, root.fileFilter)
     }
   }
 
@@ -1105,12 +1163,11 @@ Item {
 
     BorderSurface {
       id: card
-      // The list keeps its width and position; the preview pane opens to the
-      // right of it, so the field never slides when the pane comes and goes.
+      // Center the complete card as the preview opens; the list keeps its width.
       readonly property int previewSpace: root.previewState !== null ? root.previewWidth + Style.spacing.md : 0
       width: panel.cardWidth + previewSpace
       height: Math.min(content.implicitHeight + card.contentTopInset + card.contentBottomInset, panel.height - panel.cardTop - Style.gapsOut)
-      x: Math.max(Style.gapsOut, Math.min(Math.round((panel.width - panel.cardWidth) / 2), panel.width - width - Style.gapsOut))
+      x: Math.max(Style.gapsOut, Math.min(Math.round((panel.width - width) / 2), panel.width - width - Style.gapsOut))
       y: panel.cardTop
       radius: Style.cornerRadius
       color: root.background
@@ -1225,6 +1282,69 @@ Item {
         PanelSeparator {
           width: parent.width
           foreground: root.foreground
+        }
+
+        Row {
+          id: fileControls
+          visible: root.filesActive
+          width: parent.width
+          height: visible ? Style.space(32) : 0
+          spacing: Style.spacing.sm
+
+          Button {
+            width: (fileControls.width - fileControls.spacing * 2) / 3
+            height: fileControls.height
+            text: {
+              for (var i = 0; i < Model.FILE_FILTERS.length; i++) {
+                if (Model.FILE_FILTERS[i].id === root.fileFilter) return Model.FILE_FILTERS[i].label + "  Ctrl+F"
+              }
+              return ""
+            }
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            tooltipText: "Cycle file type. Shift+Ctrl+F or right-click goes back."
+            Accessible.role: Accessible.Button
+            Accessible.name: "File type: " + root.fileFilter
+            Accessible.onPressAction: root.cycleFileFilter(1)
+            onClicked: root.cycleFileFilter(1)
+            onRightClicked: root.cycleFileFilter(-1)
+          }
+
+          Button {
+            width: (fileControls.width - fileControls.spacing * 2) / 3
+            height: fileControls.height
+            text: {
+              for (var i = 0; i < Model.FILE_SORTS.length; i++) {
+                if (Model.FILE_SORTS[i].id === root.fileSort) return Model.FILE_SORTS[i].label + "  Ctrl+S"
+              }
+              return ""
+            }
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            tooltipText: "Cycle relevance, date and name sorting. Shift+Ctrl+S or right-click goes back."
+            Accessible.role: Accessible.Button
+            Accessible.name: "File sort: " + root.fileSort
+            Accessible.onPressAction: root.cycleFileSort(1)
+            onClicked: root.cycleFileSort(1)
+            onRightClicked: root.cycleFileSort(-1)
+          }
+
+          Button {
+            width: (fileControls.width - fileControls.spacing * 2) / 3
+            height: fileControls.height
+            text: "Limit " + root.fileLimit + "  Ctrl+L"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            fontSize: Style.font.caption
+            tooltipText: "Cycle 20, 40, 60, 100 and 200 results. Shift+Ctrl+L or right-click goes back."
+            Accessible.role: Accessible.Button
+            Accessible.name: "File result limit: " + root.fileLimit
+            Accessible.onPressAction: root.cycleFileLimit(1)
+            onClicked: root.cycleFileLimit(1)
+            onRightClicked: root.cycleFileLimit(-1)
+          }
         }
 
         // ---- Results
@@ -1432,9 +1552,14 @@ Item {
           Text {
             textFormat: Text.PlainText
             anchors.left: parent.left
+            anchors.right: footerVerbs.left
+            anchors.rightMargin: Style.spacing.md
+            elide: Text.ElideRight
             anchors.verticalCenter: parent.verticalCenter
             visible: root.confirmKey === "" && root.notice === ""
-            text: root.rows.length === 1 ? "1 result" : root.rows.length + " results"
+            text: root.filesActive
+              ? (sources.fileSearching ? "Searching…" : root.rows.length + " of " + root.fileMatchCount + " files" + (sources.filePaths.length >= Model.FILE_CANDIDATE_LIMIT ? " (scan cap)" : ""))
+              : (root.rows.length === 1 ? "1 result" : root.rows.length + " results")
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
             color: root.faintForeground
@@ -1643,6 +1768,15 @@ Item {
       return
     }
 
+    if (root.filesActive && control && [Qt.Key_F, Qt.Key_S, Qt.Key_L].indexOf(event.key) >= 0) {
+      var direction = shift ? -1 : 1
+      if (event.key === Qt.Key_F) cycleFileFilter(direction)
+      else if (event.key === Qt.Key_S) cycleFileSort(direction)
+      else cycleFileLimit(direction)
+      event.accepted = true
+      return
+    }
+
     if (control && event.key === Qt.Key_K) {
       openActions()
       event.accepted = true
@@ -1701,6 +1835,7 @@ Item {
   function emptyHint() {
     var parsed = Model.parseQuery(input.text, root.scope)
     if (parsed.scope === "content" && parsed.rest.length < 3) return "Type at least three characters"
+    if (parsed.scope === "files" && sources.fileSearching) return "Searching…"
     return input.text.length > 0 ? "No results" : "Type to search"
   }
 

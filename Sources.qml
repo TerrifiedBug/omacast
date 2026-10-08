@@ -51,7 +51,10 @@ Item {
   property var clipboardEntries: []
   property var emojis: []
   property bool emojiWanted: false
-  property var filePaths: []
+  property var fileRecords: ({ paths: [], mtimes: ({}) })
+  property bool fileSearching: false
+  readonly property var filePaths: root.fileRecords.paths
+  readonly property var fileMtimes: root.fileRecords.mtimes
 
   // `kill ` scope: the process list, polled every 2 s while the scope is open.
   property bool processesWanted: false
@@ -112,6 +115,9 @@ Item {
   property var pendingFiles: null
   property int fileGeneration: 0
   property int fileActiveGeneration: 0
+  property bool fileRunActive: false
+  property var pendingFileStat: null
+  property int fileStatGeneration: 0
 
   property var pendingTemplate: null
   property string pasteStage: ""
@@ -507,10 +513,11 @@ Item {
   // pending one and starts from onExited, so a fast typist queues at most one
   // extra process rather than a fan of them.
 
-  function searchFiles(dir, terms) {
+  function searchFiles(dir, terms, filter) {
     root.fileGeneration += 1
-    var request = { dir: dir, terms: terms, generation: root.fileGeneration }
-    if (fdProc.running) {
+    var request = { dir: dir, terms: terms, filter: filter || "all", generation: root.fileGeneration }
+    root.fileSearching = true
+    if (root.fileRunActive || fdProc.running) {
       root.pendingFiles = request
       return
     }
@@ -518,27 +525,31 @@ Item {
   }
 
   function runFileSearch(request) {
-    var command = ["fd", "--ignore-case", "--hidden", "--follow", "--one-file-system", "--type", "f", "--type", "d",
-      "--exclude", ".git", "--exclude", "node_modules", "--exclude", ".cache",
-      "--max-results", "200", "--threads", "2", "--absolute-path", "--color", "never"]
-
-    var terms = request.terms || []
-    if (terms.length > 0) {
-      command.push("--fixed-strings")
-      for (var i = 1; i < terms.length; i++) command = command.concat(["--and", terms[i]])
-    } else {
-      command = command.concat(["--max-depth", "1"])
+    if (!request || request.generation !== root.fileGeneration) return
+    if (root.fileRunActive || fdProc.running) {
+      root.pendingFiles = request
+      return
     }
-    command = command.concat(["--", terms.length > 0 ? terms[0] : ".", request.dir])
-
+    root.pendingFiles = null
+    fdProc.command = Model.fileCommand(request.dir, request.terms, request.filter)
     root.fileActiveGeneration = request.generation
-    fdProc.command = command
+    root.fileRunActive = true
+    root.fileSearching = true
     fdProc.running = true
+    fdKill.interval = 3000
     fdKill.restart()
   }
 
+  function finishFileSearch() {
+    root.fileRunActive = false
+    var pending = root.pendingFiles
+    root.pendingFiles = null
+    if (pending && pending.generation === root.fileGeneration) root.runFileSearch(pending)
+    else root.fileSearching = false
+  }
+
   function clearFiles() {
-    root.filePaths = []
+    root.fileRecords = { paths: [], mtimes: ({}) }
   }
 
   // Closing the palette ends the search with it: a run that lands afterwards
@@ -546,8 +557,11 @@ Item {
   function cancelFiles() {
     fdKill.stop()
     root.pendingFiles = null
+    root.pendingFileStat = null
     root.fileGeneration += 1
+    root.fileSearching = false
     if (fdProc.running) fdProc.running = false
+    if (fileStatProc.running) fileStatProc.running = false
   }
 
   // ---- Template expansion
@@ -849,18 +863,49 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         if (root.fileActiveGeneration !== root.fileGeneration) return
-        var paths = text.split("\n")
-        var out = []
-        for (var i = 0; i < paths.length; i++) if (paths[i]) out.push(paths[i])
-        root.filePaths = out
+        var paths = text.split("\n").filter(function(path) { return path !== "" })
+        if (paths.length) {
+          root.pendingFileStat = { paths: paths, generation: root.fileActiveGeneration }
+        } else {
+          root.fileRecords = { paths: [], mtimes: ({}) }
+          root.catalogChanged()
+        }
+      }
+    }
+    onExited: {
+      fdKill.stop()
+      // Keep the run occupied until its final stream callbacks have drained.
+      Qt.callLater(function() {
+        var metadata = root.pendingFileStat
+        root.pendingFileStat = null
+        if (metadata && metadata.generation === root.fileGeneration) {
+          root.fileStatGeneration = metadata.generation
+          fileStatProc.command = Model.fileStatCommand(metadata.paths)
+          fileStatProc.running = true
+          // Keep partial matches from a timed-out walk, then bound metadata
+          // collection separately so a slow filesystem cannot hold the slot.
+          fdKill.interval = 1000
+          fdKill.restart()
+        } else {
+          root.finishFileSearch()
+        }
+      })
+    }
+  }
+
+  Process {
+    id: fileStatProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (root.fileStatGeneration !== root.fileGeneration) return
+        root.fileRecords = Model.parseFileRecords(text)
         root.catalogChanged()
       }
     }
     onExited: {
       fdKill.stop()
-      var pending = root.pendingFiles
-      root.pendingFiles = null
-      if (pending) Qt.callLater(function() { root.runFileSearch(pending) })
+      Qt.callLater(function() { root.finishFileSearch() })
     }
   }
 
@@ -869,7 +914,11 @@ Item {
   Timer {
     id: fdKill
     interval: 3000
-    onTriggered: fdProc.running = false
+    onTriggered: {
+      root.pendingFileStat = null
+      if (fdProc.running) fdProc.running = false
+      if (fileStatProc.running) fileStatProc.running = false
+    }
   }
 
   // ---- Clipboard and selection reads for templates

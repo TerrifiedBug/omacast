@@ -295,8 +295,8 @@ test("previews come from the row: text inline, files and matches through a proce
   assert.deepEqual(image.payload.preview, { type: "image", path: "/p/shot.png" })
   const dir = Model.fileRows(["/p/src/"], "", "/p")[0]
   assert.equal(dir.payload.preview, null)
-  // fd prints folders without a trailing slash, so the same command has to
-  // preview both. Run it for real on each.
+  // Paths without directory metadata still need a preview command that
+  // handles either kind. Run it for real on each.
   const fs = require("node:fs")
   const os = require("node:os")
   const path = require("node:path")
