@@ -4,6 +4,7 @@ import Quickshell.Hyprland
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 import "vendor/MenuModel.js" as MenuModel
@@ -61,12 +62,12 @@ Item {
   // the example shipped beside it.
   readonly property string pluginDir: String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "")
 
-  readonly property color background: Color.menu.background
-  readonly property color foreground: Color.menu.text
-  readonly property color faintForeground: Qt.darker(Color.menu.text, 1.6)
-  readonly property color selectedBackground: Color.menu.selectedBackground
-  readonly property color selectedText: Color.menu.selectedText
-  readonly property color selectedBorder: Color.menu.selectedBorder
+  readonly property color background: Commons.Color.menu.background
+  readonly property color foreground: Commons.Color.menu.text
+  readonly property color faintForeground: Qt.darker(Commons.Color.menu.text, 1.6)
+  readonly property color selectedBackground: Commons.Color.menu.selectedBackground
+  readonly property color selectedText: Commons.Color.menu.selectedText
+  readonly property color selectedBorder: Commons.Color.menu.selectedBorder
   readonly property string fontFamily: Style.font.menuFamily
   // Nerd Font glyphs come from the bar family; OMARCHY_MENU_FONT may point
   // menuFamily at a text font with no glyph coverage.
@@ -1087,7 +1088,7 @@ Item {
 
     Rectangle {
       anchors.fill: parent
-      color: Color.menu.scrim
+      color: Commons.Color.menu.scrim
     }
 
     // Screen-fixed frame the pointer gate measures against: a delegate moves
@@ -1113,7 +1114,7 @@ Item {
       y: panel.cardTop
       radius: Style.cornerRadius
       color: root.background
-      borderSpec: Border.surfaceSpec("menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
+      borderSpec: Border.surfaceSpec("menu", "border", Commons.Color.menu.border, Math.max(1, Style.space(2)))
       padding: Style.spacing.panelPadding
 
       MouseArea { anchors.fill: parent; onClicked: {} }
@@ -1450,7 +1451,7 @@ Item {
             text: root.notice || "Press ↵ again to confirm  ·  Esc cancels"
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
-            color: Color.urgent
+            color: Commons.Color.urgent
           }
 
           Text {

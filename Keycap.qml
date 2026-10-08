@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 
 // A shortcut hint drawn the way gpui-omarchy draws its keycap: square
 // corners, a one-pixel border, faint text in the glyph family. Every colour
@@ -8,8 +9,8 @@ Rectangle {
   id: root
 
   property string text: ""
-  property color borderColor: Color.menu.selectedBorder
-  property color textColor: Qt.darker(Color.menu.text, 1.6)
+  property color borderColor: Commons.Color.menu.selectedBorder
+  property color textColor: Qt.darker(Commons.Color.menu.text, 1.6)
   property string fontFamily: Style.font.family
 
   implicitWidth: Math.max(implicitHeight, label.implicitWidth + Style.space(8))

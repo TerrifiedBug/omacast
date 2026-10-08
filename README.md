@@ -336,6 +336,12 @@ omarchy-shell shell call io.github.terrifiedbug.omacast runAction copy-path
 `runAction` takes any id from `inspect`'s `actions` list, the same ones Ctrl+K
 shows.
 
+## Theme compatibility
+
+Theme colors use a namespaced `qs.Commons.Color` import to avoid Qt 6.12's
+`Color` name collision. This keeps the existing palette roles and fallbacks
+without changing the plugin's Omarchy requirements.
+
 ## License
 
 MIT. See `LICENSE` and `NOTICE`.
