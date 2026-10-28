@@ -9,9 +9,16 @@
 // point gap between the scorer's tiers, so an exact name match always wins
 // over a much-used one.
 
+// Qt.include keeps the pure helper usable by both QML and Node without a second implementation.
+if (typeof module === "undefined") Qt.include("Learning.js")
+var Learning = typeof module !== "undefined" ? require("./Learning.js") : LearningApi
+if (typeof module === "undefined") Qt.include("ScriptModel.js")
+var ScriptArguments = typeof module !== "undefined" ? require("./ScriptModel.js") : { validateArguments: validateArguments }
+var WindowCommands = typeof module !== "undefined" ? require("./WindowModel.js") : null
+
 // ---- Sections
 
-var SECTIONS = ["answer", "pinned", "recent", "apps", "windows", "actions", "keybindings", "quicklinks", "snippets", "commands", "clipboard", "emoji", "files", "processes", "hidden", "help", "web", "settingsGeneral", "settingsShortcuts", "settingsLibrary", "settingsAdvanced", "settingsEntries", "settingsFields"]
+var SECTIONS = ["answer", "pinned", "recent", "apps", "windows", "windowActions", "actions", "keybindings", "quicklinks", "snippets", "commands", "projects", "ssh", "bookmarks", "plugins", "scriptResults", "picker", "clipboard", "emoji", "files", "processes", "hidden", "help", "semantic", "agent", "status", "web", "settingsGeneral", "settingsShortcuts", "settingsLibrary", "settingsAdvanced", "settingsEntries", "settingsFields"]
 
 var SECTION_TITLES = {
   answer: "Answer",
@@ -19,6 +26,7 @@ var SECTION_TITLES = {
   recent: "Recent",
   apps: "Applications",
   windows: "Windows",
+  windowActions: "Window actions",
   actions: "Omarchy",
   keybindings: "Keybindings",
   quicklinks: "Quicklinks",
@@ -26,6 +34,15 @@ var SECTION_TITLES = {
   commands: "Commands",
   clipboard: "Clipboard",
   emoji: "Emoji",
+  projects: "Projects",
+  ssh: "SSH hosts",
+  bookmarks: "Bookmarks",
+  plugins: "Plugin panels",
+  scriptResults: "Script results",
+  picker: "Choose",
+  semantic: "Semantic suggestions",
+  agent: "Agent answer",
+  status: "Source status",
   files: "Files",
   processes: "Processes",
   hidden: "Hidden",
@@ -53,6 +70,15 @@ var SECTION_CAPS = {
   commands: 4,
   clipboard: 40,
   emoji: 60,
+  projects: 20,
+  ssh: 20,
+  bookmarks: 20,
+  plugins: 20,
+  scriptResults: 200,
+  picker: 200,
+  semantic: 8,
+  agent: 8,
+  status: 40,
   files: 20,
   processes: 200,
   hidden: 200,
@@ -193,15 +219,20 @@ function lower(value) {
   return String(value === undefined || value === null ? "" : value).toLowerCase()
 }
 
+function normalizeSearch(value) {
+  var text = String(value === undefined || value === null ? "" : value)
+  return text.normalize("NFKD").replace(/[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]/g, "")
+    .toLowerCase().replace(/ß/g, "ss").replace(/ς/g, "σ").replace(/æ/g, "ae").replace(/œ/g, "oe").replace(/ø/g, "o").replace(/ł/g, "l").replace(/đ/g, "d")
+}
+
 function wordText(value) {
-  return String(value || "")
+  return normalizeSearch(String(value || "")
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
-    .replace(/[._:/\\-]+/g, " ")
-    .toLowerCase()
+    .replace(/[._:/\\-]+/g, " "))
 }
 
 function words(value) {
-  var parts = wordText(value).split(/[^a-z0-9]+/)
+  var parts = wordText(value).split(/[\s!"#$%&'()*+,.;<=>?@[\\\]^`{|}~]+/)
   var out = []
   for (var i = 0; i < parts.length; i++) if (parts[i]) out.push(parts[i])
   return out
@@ -247,7 +278,7 @@ function fieldAliases(fields) {
   var values = (fields && fields.aliases) || []
   var out = []
   for (var i = 0; i < values.length; i++) {
-    var alias = lower(values[i])
+    var alias = normalizeSearch(values[i])
     if (alias) out.push(alias)
   }
   return out
@@ -258,11 +289,11 @@ function fieldAliases(fields) {
 // file or guard event prepares them once; everyone else passes plain strings
 // and matchScore does it inline.
 function prepareFields(name, aliases, text) {
-  var lowered = lower(name)
+  var lowered = normalizeSearch(name)
   return {
     name: lowered,
     aliases: fieldAliases({ aliases: aliases }),
-    text: lower(text),
+    text: normalizeSearch(text),
     acronym: acronymOf(lowered),
     words: wordText(lowered),
     prepared: true
@@ -313,13 +344,13 @@ function termMatches(term, name, aliases, text, acronym, words) {
 }
 
 function matchScore(query, fields) {
-  var q = lower(query).trim()
+  var q = normalizeSearch(query).trim()
   if (!q) return 0
 
   var ready = fields && fields.prepared === true
-  var name = ready ? fields.name : lower(fields && fields.name)
+  var name = ready ? fields.name : normalizeSearch(fields && fields.name)
   var aliases = ready ? fields.aliases : fieldAliases(fields)
-  var text = ready ? fields.text : lower(fields && fields.text)
+  var text = ready ? fields.text : normalizeSearch(fields && fields.text)
   var acronym = ready ? fields.acronym : acronymOf(name)
   var nameWords = ready ? fields.words : wordText(name)
 
@@ -374,13 +405,13 @@ function nearMissScore(query, name) {
 
 // ---- Frecency (zoxide's shape: a decayed launch count, bounded)
 
-var FRECENCY_MAX = 400
+var FRECENCY_MAX = 300
 var FRECENCY_HALF = 6
 var USAGE_LIMIT = 400
 // The empty palette has room the root search does not: nothing competes with
 // the window list there.
 var EMPTY_WINDOW_LIMIT = 8
-var USAGE_KEY = /^(app|menu|bind|ql|snip|cmd|oc|theme|sc):[^\x00-\x1f]{1,240}$/
+var USAGE_KEY = /^(app|menu|bind|ql|snip|cmd|oc|theme|sc|project|proj|ssh|bookmark|bm|plugin|panel):[^\x00-\x1f]{1,240}$/
 var LAST_QUERY_LIMIT = 240
 
 function decay(ageMs) {
@@ -486,7 +517,88 @@ function normalizeState(raw) {
 
   var lastQuery = typeof value.lastQuery === "string" ? clip(value.lastQuery.replace(/[\x00-\x1f]+/g, " "), LAST_QUERY_LIMIT) : ""
 
-  return { version: 1, usage: usage, pins: normalizeKeys(value.pins), hidden: normalizeKeys(value.hidden), lastQuery: lastQuery }
+  var next = Object.assign({}, value)
+  next.version = 1
+  next.usage = usage
+  next.pins = normalizeKeys(value.pins)
+  next.hidden = normalizeKeys(value.hidden)
+  next.lastQuery = lastQuery
+  next.aliases = normalizeAliases(value.aliases)
+  next.queryHistory = Learning.normalize(value.queryHistory, eligibleLearningKey)
+  return next
+}
+
+function eligibleLearningKey(key) {
+  return typeof key === "string" && USAGE_KEY.test(key)
+}
+
+function normalizeAliases(raw) {
+  var out = ({})
+  var seen = ({})
+  Object.keys(raw || {}).forEach(function(key) {
+    if (!eligibleLearningKey(key) || typeof raw[key] !== "string" || Object.keys(out).length >= 200) return
+    var alias = normalizeSearch(raw[key]).trim()
+    if (!/^[^\s\x00-\x1f]{1,40}$/.test(alias) || seen[alias]) return
+    seen[alias] = true
+    out[key] = alias
+  })
+  return out
+}
+
+function aliasTarget(query, state) {
+  var match = String(query || "").replace(/^\s+/, "").match(/^(\S+)(?:\s([\s\S]*))?$/)
+  if (!match) return null
+  var token = normalizeSearch(match[1])
+  var aliases = normalizeState(state).aliases
+  var keys = Object.keys(aliases)
+  for (var i = 0; i < keys.length; i++) {
+    if (aliases[keys[i]] === token) return { key: keys[i], alias: aliases[keys[i]], argument: match[2] || "" }
+  }
+  return null
+}
+
+function setAlias(state, key, text, reservedKeywords) {
+  var current = normalizeState(state)
+  var alias = normalizeSearch(text).trim()
+  if (!alias) return { ok: true, error: "", state: clearAlias(current, key) }
+  if (!eligibleLearningKey(key)) return { ok: false, error: "This result cannot have an alias", state: current }
+  if (!/^[^\s\x00-\x1f]{1,40}$/.test(alias)) return { ok: false, error: "Use one token, up to 40 characters", state: current }
+  var reserved = ["cb", "clip", "clipboard", "f", "file", "files", "win", "kill", "proj", "ssh", "bm", "panel"].concat(reservedKeywords || [])
+  if (/^[?:#~/.]/.test(alias) || reserved.some(function(word) { return normalizeSearch(typeof word === "object" ? word.keyword : word) === alias })) return { ok: false, error: "That alias is reserved by a search prefix or keyword", state: current }
+  var collision = Object.keys(current.aliases).some(function(other) { return other !== key && current.aliases[other] === alias })
+  if (collision) return { ok: false, error: "That alias is already in use", state: current }
+  if (!current.aliases[key] && Object.keys(current.aliases).length >= 200) return { ok: false, error: "Remove an alias before adding another", state: current }
+  current.aliases[key] = alias
+  return { ok: true, error: "", state: current }
+}
+
+function clearAlias(state, key) {
+  var current = normalizeState(state)
+  delete current.aliases[key]
+  return current
+}
+
+function recordQueryUse(state, key, contextHash, now) {
+  var current = normalizeState(state)
+  current.queryHistory = Learning.record(current.queryHistory, key, contextHash, now, eligibleLearningKey)
+  return current
+}
+
+function queryBonus(state, key, contextHash, now) {
+  return eligibleLearningKey(key) ? Learning.bonus(state && state.queryHistory, key, contextHash, now) : 0
+}
+
+function clearQueryHistory(state) {
+  return updateState(state, { queryHistory: ({}) })
+}
+
+function personalizeRows(rows, state, contextHash, now) {
+  return (rows || []).map(function(item) {
+    if (!eligibleLearningKey(item.frecencyKey || item.key)) return item
+    var next = Object.assign({}, item)
+    next.score = (item.score || 0) + queryBonus(state, item.frecencyKey || item.key, contextHash, now)
+    return next
+  })
 }
 
 function updateState(state, patch) {
@@ -527,7 +639,7 @@ function resetUsage(state, key) {
   var current = normalizeState(state)
   var usage = ({})
   for (var k in current.usage) if (k !== key) usage[k] = current.usage[k]
-  return updateState(current, { usage: usage })
+  return updateState(current, { usage: usage, queryHistory: Learning.remove(current.queryHistory, key, eligibleLearningKey) })
 }
 
 function rememberQuery(state, text) {
@@ -590,7 +702,7 @@ function emptyQueryRows(catalog, state, now) {
 // A pushed scope always wins: once the user is inside Clipboard, typing `f `
 // searches clipboard text for "f", it does not jump to files.
 
-var SCOPES = ["clipboard", "emoji", "files", "windows", "help", "kill", "content", "hidden", "settings"]
+var SCOPES = ["clipboard", "emoji", "files", "windows", "help", "kill", "content", "hidden", "settings", "projects", "ssh", "bookmarks", "plugins", "scriptResults", "picker", "agent"]
 
 function isSettingsScope(scope) {
   return String(scope || "").indexOf("settings") === 0
@@ -618,6 +730,9 @@ function parseQuery(text, scope) {
 
   if (lead.charAt(0) === ":") return { raw: raw, trimmed: trimmed, scope: "emoji", prefix: ":", rest: lead.slice(1).trim() }
 
+  var navigation = lead.match(/^(proj|ssh|bm|panel)\s([\s\S]*)$/)
+  if (navigation) return { raw: raw, trimmed: trimmed, scope: ({ proj: "projects", ssh: "ssh", bm: "bookmarks", panel: "plugins" })[navigation[1]], prefix: navigation[1], rest: navigation[2].trim() }
+
   var clip = lead.match(/^(cb|clip|clipboard)\s([\s\S]*)$/)
   if (clip) return { raw: raw, trimmed: trimmed, scope: "clipboard", prefix: clip[1], rest: clip[2].trim() }
 
@@ -643,21 +758,35 @@ function parseQuery(text, scope) {
 // Where fd should look and what it should match, for both file entries: an
 // explicit path (`~/coding/oma`) browses that directory, `f oma cast` searches
 // $HOME for files matching every term.
-function fileRequest(parsed, home) {
-  var base = String(home || "")
-  if (!parsed || parsed.scope !== "files") return { dir: base, terms: [] }
-
-  if (parsed.prefix === "path") {
-    var path = parsed.rest
-    if (path.charAt(0) === "~") path = base + path.slice(1)
-    var cut = path.lastIndexOf("/")
-    var dir = cut <= 0 ? "/" : path.slice(0, cut)
-    var term = path.slice(cut + 1)
-    return { dir: dir, terms: term ? [term] : [] }
+function fileRequest(parsed, home, roots, selectedRoot) {
+  var available = Array.isArray(roots) && roots.length ? roots : [{ name: "Home", path: String(home || "") }]
+  var wanted = typeof selectedRoot === "object" && selectedRoot ? selectedRoot.name : selectedRoot
+  var rest = parsed ? String(parsed.rest || "") : ""
+  var root = null
+  for (var r = 0; r < available.length; r++) if (lower(available[r].name) === lower(wanted)) root = available[r]
+  if (wanted && !root) return { dir: "", terms: [], rootName: wanted, rootPath: "", error: "Unknown file root" }
+  if (!root) root = available[0]
+  var named = parsed && parsed.scope === "files" && parsed.prefix !== "path" ? rest.match(/^@(\S+)(?:\s+([\s\S]*))?$/) : null
+  if (named) {
+    for (var n = 0; n < available.length; n++) {
+      if (lower(available[n].name) !== lower(named[1])) continue
+      root = available[n]
+      rest = named[2] || ""
+      break
+    }
   }
-
-  var terms = parsed.rest ? parsed.rest.split(/\s+/) : []
-  return { dir: base, terms: terms }
+  var base = root.path
+  var result = { dir: base, terms: [], rootName: root.name, rootPath: base }
+  if (!parsed || (parsed.scope !== "files" && parsed.scope !== "content")) return result
+  if (parsed.prefix === "path") {
+    var path = rest
+    if (path.charAt(0) === "~") path = String(home || "") + path.slice(1)
+    var cut = path.lastIndexOf("/")
+    result.dir = cut <= 0 ? "/" : path.slice(0, cut)
+    var term = path.slice(cut + 1)
+    result.terms = term ? [term] : []
+  } else result.terms = rest ? rest.split(/\s+/) : []
+  return result
 }
 
 // ---- Providers
@@ -709,7 +838,7 @@ function windowRows(toplevels, query) {
     var score = matchScore(query, { name: title, aliases: [appId], text: "" })
     if (score < 0) continue
     out.push(row({
-      key: "win:" + top.index + ":" + appId,
+      key: "win:" + (top.target ? top.target.stableId + ":" + top.target.address : top.identity || top.index) + ":" + appId,
       section: "windows",
       title: title,
       subtitle: appId,
@@ -718,7 +847,7 @@ function windowRows(toplevels, query) {
       secondaryLabel: "Close window",
       score: score,
       order: i,
-      payload: { kind: "window", index: top.index, appId: appId }
+      payload: { kind: "window", target: top.target ? { address: top.target.address, stableId: String(top.target.stableId), workspace: top.target.workspace } : null, handle: top.toplevel || null, appId: appId }
     }))
   }
   return out
@@ -1010,7 +1139,7 @@ function flatten(text) {
 
 function clipboardRows(entries, query) {
   var values = entries || []
-  var q = lower(query).trim()
+  var q = normalizeSearch(query).trim()
   var terms = q ? q.split(/\s+/) : []
   var out = []
 
@@ -1019,7 +1148,7 @@ function clipboardRows(entries, query) {
 
     if (entry.type === "image") {
       var label = entry.capturedAt ? "Image " + entry.capturedAt : "Image"
-      if (q && lower(label + " " + entry.mime).indexOf(q) < 0) continue
+      if (q && normalizeSearch(label + " " + entry.mime).indexOf(q) < 0) continue
       out.push(row({
         key: "clip:" + entry.historyIndex,
         section: "clipboard",
@@ -1035,7 +1164,7 @@ function clipboardRows(entries, query) {
     }
 
     var head = String(entry.text || "").slice(0, CLIP_SCAN)
-    var haystack = lower(head)
+    var haystack = normalizeSearch(head)
     var matched = true
     for (var t = 0; t < terms.length; t++) {
       if (haystack.indexOf(terms[t]) < 0) { matched = false; break }
@@ -1062,13 +1191,13 @@ function clipboardRows(entries, query) {
 
 function emojiRows(emojis, query) {
   var values = emojis || []
-  var q = lower(query).trim()
+  var q = normalizeSearch(query).trim()
   var terms = q ? q.split(/\s+/) : []
   var out = []
 
   for (var i = 0; i < values.length; i++) {
     var entry = values[i]
-    var keywords = lower(entry.k)
+    var keywords = normalizeSearch(entry.k)
     var score = 500
     var matched = true
 
@@ -1114,43 +1243,152 @@ var FILE_SORTS = [
   { id: "nameDesc", label: "Name Z–A" }
 ]
 
+// Commands stream bounded output, never an unbounded StdioCollector payload.
+// Exit codes: 0 complete (including rg no matches), 3 truncated, 4 failed,
+// 124 timed out, 137 forced timeout kill. Complete NUL records emitted before
+// failure remain usable. timeout owns the entire pipeline's process group,
+// including TERM cancellation; callers must not SIGKILL its supervisor.
+var FILE_OUTPUT_LIMIT = 262144
+var READ_LIMIT = 65536
+var BOUNDED_READER = [
+  'export LC_ALL=C',
+  'mode=$1; limit=$2; count=$3; initial=$4; shift 4',
+  'producer=$1',
+  // Limit Bash's read itself: an intermediary block reader can withhold a
+  // short complete path until timeout, or count short reads as full blocks.
+  '"$@" 2>/dev/null | {',
+  '  if [ "$mode" = records ]; then',
+  '    used=0; records=0; record=',
+  '    while IFS= read -r -d "" -n "$((limit - used + 1))" record; do',
+  '      [ -n "$record" ] || continue',
+  '      size=$((${#record} + 1))',
+  '      if ((used + size > limit || records >= count)); then exit 3; fi',
+  '      printf "%s\\0" "$record"',
+  '      used=$((used + size)); records=$((records + 1)); record=',
+  '    done',
+  '    [ -z "$record" ] || exit 3',
+  '  else',
+  '    tmp=$(mktemp -d) || exit 4',
+  '    trap \'rm -rf -- "$tmp"\' EXIT',
+  '    trap "exit 124" TERM INT',
+  '    dd bs=8192 iflag=count_bytes,fullblock count="$((limit + 1))" status=none > "$tmp/data" || exit 4',
+  '    size=$(wc -c < "$tmp/data")',
+  '    head -c "$limit" -- "$tmp/data" || exit 4',
+  '    if ((size > limit)); then',
+  '      [ "$mode" != preview ] || printf "\\n[Preview truncated]\\n"',
+  '      exit 3',
+  '    fi',
+  '  fi',
+  '}',
+  'status=("${PIPESTATUS[@]}")',
+  'if ((status[1] != 0 && status[1] != 3)); then exit 4; fi',
+  // A capped consumer intentionally closes its pipe. Only SIGPIPE is expected;
+  // real producer errors must not be hidden by the cap.
+  'if ((status[0] != 0 && status[0] != 141)) && ! { [ "$producer" = rg ] && ((status[0] == 1)); } && ! { [ "$producer" = bash ] && ((status[0] == 3)); }; then exit 4; fi',
+  'if ((status[1] == 3)) || [ "$initial" = 1 ] || { [ "$producer" = bash ] && ((status[0] == 3)); }; then exit 3; fi',
+  'if ((status[0] == 141)); then exit 4; fi',
+  'exit 0'
+].join("\n")
+
+function boundedCommand(mode, command, limit, count, truncated) {
+  return ["timeout", "--kill-after=1s", "5s", "bash", "-c", BOUNDED_READER,
+    "omacast-reader", mode, String(limit), String(count || 0), truncated ? "1" : "0"].concat(command)
+}
+
+function parseFilePaths(text) {
+  var records = String(text || "").split("\u0000")
+  records.pop()
+  return records.filter(function(path) { return path !== "" })
+}
+
+function contentCommand(home, term) {
+  return boundedCommand("records", ["rg", "--files-with-matches", "--null", "--max-count", "1", "--max-filesize", "2M", "--hidden",
+    "--glob", "!.git", "--glob", "!node_modules", "--glob", "!.cache",
+    "--fixed-strings", "--ignore-case", "--", String(term || ""), String(home || "")],
+    FILE_OUTPUT_LIMIT, 200, false)
+}
+
+function pasteCommand(selection) {
+  var command = ["wl-paste", "--no-newline"]
+  if (selection) command.push("--primary")
+  return boundedCommand("bytes", command, READ_LIMIT, 0, false)
+}
+
+// Filter the NUL stream before the supervisor counts candidates, so unrelated
+// filenames cannot crowd Unicode matches out of the bounded result set.
+var FILE_SEARCH_FILTER = [
+  "import os,sys,unicodedata",
+  "marks={point:None for start,end in [(0x300,0x36f),(0x1ab0,0x1aff),(0x1dc0,0x1dff),(0x20d0,0x20ff),(0xfe20,0xfe2f)] for point in range(start,end+1)}",
+  "folds=str.maketrans({'ß':'ss','ς':'σ','æ':'ae','œ':'oe','ø':'o','ł':'l','đ':'d'})",
+  "def fold(text):",
+  " if text.isascii(): return text.lower()",
+  " return unicodedata.normalize('NFKD',text).translate(marks).lower().translate(folds)",
+  "terms=[fold(term) for term in sys.argv[1:]]",
+  "pending=b''",
+  "discard=False",
+  "while True:",
+  " chunk=sys.stdin.buffer.read1(8192)",
+  " if not chunk: break",
+  " records=(pending+chunk).split(b'\\0')",
+  " pending=records.pop()",
+  " for record in records:",
+  "  if discard: discard=False; continue",
+  "  if len(record)>65536: continue",
+  "  name=fold(os.fsdecode(record))",
+  "  if all(term in name for term in terms):",
+  "   try: sys.stdout.buffer.write(record+b'\\0'); sys.stdout.buffer.flush()",
+  "   except BrokenPipeError: os._exit(0)",
+  " if len(pending)>65536: pending=b''; discard=True"
+].join("\n")
+
 function fileCommand(dir, terms, filter) {
   var selected = FILE_FILTERS[0]
   for (var f = 0; f < FILE_FILTERS.length; f++) {
     if (FILE_FILTERS[f].id === filter) { selected = FILE_FILTERS[f]; break }
   }
-  var command = ["fd", "--ignore-case", "--hidden", "--follow", "--one-file-system",
+  var command = ["fd", "--ignore-case", "--hidden", "--one-file-system",
     "--exclude", ".git", "--exclude", "node_modules", "--exclude", ".cache",
-    "--max-results", String(FILE_CANDIDATE_LIMIT), "--threads", "2",
-    "--absolute-path", "--color", "never", "--full-path"]
+    "--threads", "2", "--absolute-path", "--print0", "--color", "never", "--full-path"]
   command.push("--type", selected.id === "folders" ? "d" : "f")
   if (selected.id === "all") command.push("--type", "d")
 
   var values = (terms || []).filter(function(value) { return String(value || "") !== "" })
-  if (!values.length) command.push("--max-depth", "1")
+  if (!values.length) command.push("--max-depth", "1", "--max-results", String(FILE_CANDIDATE_LIMIT + 1))
   if (selected.id === "code") {
-    // fd's fixed-string flag covers every pattern. Escape user terms when
-    // the filename predicate needs regex, so they still mean literal text.
     var names = selected.names.map(function(name) { return name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") })
     command.push("--and=(?:^|/)(?:[^/]+\\.(?:" + selected.extensions.join("|") + ")|" + names.join("|") + ")$")
-    for (var c = 0; c < values.length; c++) command.push("--and=" + String(values[c]).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
   } else {
-    command.push("--fixed-strings")
     if (selected.extensions) {
       for (var e = 0; e < selected.extensions.length; e++) command.push("--extension", selected.extensions[e])
     }
-    for (var t = 0; t < values.length; t++) command.push("--and=" + String(values[t]))
   }
   command.push("--search-path", String(dir || ""), "")
-  return command
+  if (values.length) {
+    var pipe = 'filter=$1; count=$2; shift 2; terms=(); for ((i=0;i<count;i++)); do terms+=("$1"); shift; done; "$@" | python3 -I -X utf8 -u -c "$filter" "${terms[@]}"'
+    command = ["bash", "-o", "pipefail", "-c", pipe, "omacast-file-search", FILE_SEARCH_FILTER, String(values.length)].concat(values.map(function(value) { return String(value) }), command)
+  }
+  return boundedCommand("records", command, FILE_OUTPUT_LIMIT, FILE_CANDIDATE_LIMIT, false)
 }
 
 function fileStatCommand(paths) {
-  return ["stat", "--dereference", "--printf", "%Y\t%f\t%n\n", "--"].concat(paths)
+  // Bound total argv bytes, including NULs, rather than sending 2500 arbitrarily
+  // long paths. Each pathname remains a separate argument, never shell source.
+  var selected = []
+  var size = 0
+  for (var i = 0; i < paths.length; i++) {
+    var path = String(paths[i])
+    var bytes = unescape(encodeURIComponent(path)).length + 1
+    if (size + bytes > FILE_OUTPUT_LIMIT || selected.length >= FILE_CANDIDATE_LIMIT) break
+    selected.push(path)
+    size += bytes
+  }
+  if (!selected.length) return boundedCommand("records", ["true"], FILE_OUTPUT_LIMIT, FILE_CANDIDATE_LIMIT, paths.length > 0)
+  return boundedCommand("records", ["stat", "--dereference", "--printf", "%Y\t%f\t%n\\0", "--"].concat(selected),
+    FILE_OUTPUT_LIMIT, FILE_CANDIDATE_LIMIT, selected.length < paths.length)
 }
 
 function parseFileRecords(text) {
-  var lines = String(text || "").split("\n")
+  var lines = parseFilePaths(text)
   var paths = []
   var mtimes = ({})
   for (var i = 0; i < lines.length; i++) {
@@ -1193,9 +1431,9 @@ function shortenHome(path, home) {
 
 function rankFile(path, query) {
   var normalized = String(path || "").replace(/\/+$/, "")
-  var name = lower(basename(normalized))
-  var full = lower(normalized)
-  var terms = lower(query).trim().split(/\s+/).filter(function(term) { return term !== "" })
+  var name = normalizeSearch(basename(normalized))
+  var full = normalizeSearch(normalized)
+  var terms = normalizeSearch(query).trim().split(/\s+/).filter(function(term) { return term !== "" })
   var minimum = 5
   var total = 0
   for (var t = 0; t < terms.length; t++) {
@@ -1415,6 +1653,13 @@ var SCOPE_ROWS = [
   { scope: "content", name: "Search File Contents", icon: ICON_SEARCH },
   { scope: "windows", name: "Windows", icon: ICON_WINDOW },
   { scope: "kill", name: "Kill Process", icon: ICON_PROCESS },
+  { scope: "projects", name: "Projects", icon: ICON_FOLDER },
+  { scope: "ssh", name: "SSH Hosts", icon: ICON_COMMAND },
+  { scope: "bookmarks", name: "Bookmarks", icon: ICON_LINK },
+  { scope: "plugins", name: "Plugin Panels", icon: ICON_MENU },
+  { scope: "scriptResults", name: "Script Results", icon: ICON_CODE },
+  { scope: "picker", name: "Choose", icon: ICON_SEARCH },
+  { scope: "agent", name: "Agent Answer", icon: ICON_CHAT },
   { scope: "help", name: "Keywords & Prefixes", icon: ICON_SEARCH }
 ]
 
@@ -1432,6 +1677,10 @@ var HELP_PREFIXES = [
   { token: "#", detail: "Search inside files, as in  #TODO", icon: ICON_SEARCH },
   { token: "win ", detail: "Open windows, as in  win chrome", icon: ICON_WINDOW },
   { token: "kill ", detail: "Terminate one of your processes, as in  kill firefox", icon: ICON_PROCESS },
+  { token: "proj ", detail: "Search projects", icon: ICON_FOLDER },
+  { token: "ssh ", detail: "Search SSH hosts", icon: ICON_COMMAND },
+  { token: "bm ", detail: "Search bookmarks", icon: ICON_LINK },
+  { token: "panel ", detail: "Search enabled plugin panels", icon: ICON_MENU },
   { token: "remind ", detail: "Set a reminder, as in  remind 30 check the oven", icon: ICON_BELL },
   { token: "~/", detail: "Browse a path, as in  ~/coding/", icon: ICON_FILE }
 ]
@@ -1537,6 +1786,7 @@ function settingsRows(doc, ctx, query) {
   var config = ctx.config
   var binds = ctx.binds
   var specs = [
+    { key: "setting:windows", section: "settingsGeneral", title: "Window management", subtitle: "Tiling presets, floating sizes and shortcuts", primaryLabel: "Configure", action: { type: "push", scope: "settings:windows" } },
     { key: "setting:engine", section: "settingsGeneral", title: "Search engine", subtitle: config.searchQuicklink ? config.searchQuicklink.name + " · " + config.searchQuicklink.keyword : "None", primaryLabel: "Change", action: { type: "push", scope: "settings:engine" } },
     { key: "setting:preview", section: "settingsGeneral", title: "Preview pane", subtitle: "Beside the list on screens 1400 px and wider", accessory: doc.preview ? "On" : "Off", primaryLabel: "Toggle", action: { type: "config", op: { op: "set", key: "preview", value: !doc.preview } } },
     { key: "setting:currency", section: "settingsGeneral", title: "Currency rates", subtitle: "Downloads ECB reference rates once a day", accessory: doc.currency ? "On" : "Off", primaryLabel: "Toggle", action: { type: "config", op: { op: "set", key: "currency", value: !doc.currency } } },
@@ -1545,7 +1795,7 @@ function settingsRows(doc, ctx, query) {
     { key: "setting:palette", section: "settingsShortcuts", title: "Open palette", subtitle: binds.palette || (ctx.handBound ? "Bound by hand in bindings.lua" : "Not bound"), accessory: binds.palette ? "Keyboard" : "", primaryLabel: binds.palette ? "Change" : "Bind", secondaryLabel: binds.palette ? "Unbind" : "", action: { type: "editChord" }, secondaryAction: { type: "binds", patch: { palette: "" } } },
     { key: "setting:clipboard", section: "settingsShortcuts", title: "Clipboard history on SUPER + CTRL + V", subtitle: "Replaces Omarchy's clipboard manager while on", accessory: binds.clipboard ? "On" : "Off", primaryLabel: "Toggle", action: { type: "binds", patch: { clipboard: !binds.clipboard } } }
   ]
-  ;["quicklinks", "snippets", "commands"].forEach(function(kind) {
+  ;["quicklinks", "snippets", "commands", "fileRoots"].forEach(function(kind) {
     specs.push({ key: "setting:" + kind, section: "settingsLibrary", title: scopeTitle("settings:" + kind), subtitle: doc[kind].length + " entries", primaryLabel: "Browse", action: { type: "push", scope: "settings:" + kind } })
   })
   var hidden = DEFAULT_QUICKLINKS.filter(function(link) { return doc.hiddenQuicklinks.indexOf(link.keyword) >= 0 || doc.hiddenQuicklinks.indexOf(link.name.toLowerCase()) >= 0 }).length
@@ -1553,6 +1803,11 @@ function settingsRows(doc, ctx, query) {
   specs.push({ key: "setting:dirs", section: "settingsLibrary", title: "Script folders", subtitle: ctx.scriptDir + (doc.scriptDirs.length ? " + " + doc.scriptDirs.length + " more" : ""), primaryLabel: "Browse", action: { type: "push", scope: "settings:scriptDirs" } })
   specs.push({ key: "setting:config", section: "settingsAdvanced", title: "Edit config file", subtitle: ctx.configPath, primaryLabel: "Edit", payload: { kind: "config" } })
   specs.push({ key: "setting:scripts", section: "settingsAdvanced", title: "Scripts folder", subtitle: ctx.scriptDir, primaryLabel: "Open", payload: { kind: "scriptsFolder", path: ctx.scriptDir } })
+  var toggles = { queryLearning: "Learn query choices", protectPreviews: "Protect private files", projectsEnabled: "Projects", zoxideEnabled: "Include zoxide projects", sshEnabled: "SSH hosts", bookmarksEnabled: "Bookmarks", pluginPanelsEnabled: "Plugin panels", scriptForms: "Script argument forms", inlineAi: "Inline agent answers", semantic: "Local semantic suggestions" }
+  Object.keys(toggles).forEach(function(key) {
+    specs.push({ key: "setting:" + key, section: "settingsGeneral", title: toggles[key], accessory: doc[key] ? "On" : "Off", primaryLabel: "Toggle", action: { type: "config", op: { op: "set", key: key, value: !doc[key] } } })
+  })
+  specs.push({ key: "setting:clearQueryHistory", section: "settingsAdvanced", title: "Clear learned query choices", primaryLabel: "Clear", confirm: true, action: { type: "clear-query-history" } })
   return filterSettingsRows(specs, query)
 }
 
@@ -1574,8 +1829,8 @@ function settingsBuiltinRows(doc, query) {
 function settingsListRows(doc, kind, query) {
   if (!Object.prototype.hasOwnProperty.call(LIST_KINDS, kind)) return []
   var specs = doc[kind].map(function(entry, index) {
-    var detail = kind === "quicklinks" ? entry.url : kind === "snippets" ? firstLine(entry.text) : entry.command
-    return { key: "setting:" + kind + ":" + index, section: "settingsEntries", title: entry.name || "(unnamed)", subtitle: entry.keyword + " · " + detail, primaryLabel: "Edit", action: { type: "push", scope: "settings:" + kind + ":" + index } }
+    var detail = kind === "fileRoots" ? entry.path : kind === "quicklinks" ? entry.url : kind === "snippets" ? firstLine(entry.text) : entry.command
+    return { key: "setting:" + kind + ":" + index, section: "settingsEntries", title: entry.name || "(unnamed)", subtitle: (entry.keyword ? entry.keyword + " · " : "") + detail, primaryLabel: "Edit", action: { type: "push", scope: "settings:" + kind + ":" + index } }
   })
   specs.push({ key: "setting:" + kind + ":add", section: "settingsEntries", title: "Add " + LIST_KINDS[kind].label, primaryLabel: "Add", action: { type: "config", op: { op: "add", kind: kind }, pushIndex: true } })
   return filterSettingsRows(specs, query)
@@ -1584,7 +1839,7 @@ function settingsListRows(doc, kind, query) {
 function settingsEntryRows(doc, kind, index, query) {
   if (!Object.prototype.hasOwnProperty.call(LIST_KINDS, kind) || !Number.isInteger(index) || index < 0 || index >= doc[kind].length) return []
   var entry = doc[kind][index]
-  var labels = { name: "Name", keyword: "Keyword", url: "URL", text: "Text", command: "Command", terminal: "Run in a terminal", confirm: "Ask before running" }
+  var labels = { name: "Name", path: "Root path", keyword: "Keyword", url: "URL", text: "Text", command: "Command", terminal: "Run in a terminal", confirm: "Ask before running" }
   var specs = LIST_KINDS[kind].fields.map(function(field) {
     var current = entry[field]
     var boolean = field === "terminal" || field === "confirm"
@@ -1635,11 +1890,12 @@ function scopeTitle(scope, doc) {
     var parts = String(scope).split(":")
     if (!parts[1]) return "Settings"
     var kind = parts[1]
+    if (kind === "windows") return parts[2] === "layouts" ? "Workspace preset" : parts[2] === "size" ? "Custom floating size" : "Window management"
     if (Object.prototype.hasOwnProperty.call(LIST_KINDS, kind) && parts[2] !== undefined) {
       var entry = doc && doc[kind] && doc[kind][parseInt(parts[2], 10)]
       return entry && entry.name || LIST_KINDS[kind].label
     }
-    return { engine: "Search engine", builtins: "Built-in quicklinks", quicklinks: "Quicklinks", snippets: "Snippets", commands: "Commands", scriptDirs: "Script folders" }[kind] || "Settings"
+    return { engine: "Search engine", builtins: "Built-in quicklinks", quicklinks: "Quicklinks", snippets: "Snippets", commands: "Commands", scriptDirs: "Script folders", fileRoots: "File roots" }[kind] || "Settings"
   }
   if (scope === "hidden") return "Hidden"
   for (var i = 0; i < SCOPE_ROWS.length; i++) {
@@ -1658,6 +1914,13 @@ function scopePlaceholder(scope) {
   if (scope === "kill") return "Search your processes…"
   if (scope === "hidden") return "Search hidden rows…"
   if (scope === "help") return "Search prefixes and keywords…"
+  if (scope === "projects") return "Search projects…"
+  if (scope === "ssh") return "Search SSH hosts…"
+  if (scope === "bookmarks") return "Search bookmarks…"
+  if (scope === "plugins") return "Search enabled plugin panels…"
+  if (scope === "scriptResults") return "Filter script results…"
+  if (scope === "picker") return "Filter choices…"
+  if (scope === "agent") return "Ask the agent explicitly…"
   if (String(scope || "").indexOf("menu:") === 0) return "Search this menu…"
   return "Search apps, windows, actions…  ? for keywords"
 }
@@ -2180,20 +2443,20 @@ function parseProcesses(text) {
 
   var out = []
   for (var i = 1; i < lines.length; i++) {
-    var m = lines[i].match(/^\s*(\d+)\s+([\d.]+)\s+([\d.]+)\s+(.+?)\s*$/)
+    var m = lines[i].match(/^\s*(\d+)\t([\d.]+)\t([\d.]+)\t(\d+)\t(.+?)\s*$/)
     if (!m || skip[m[1]]) continue
-    out.push({ pid: m[1], cpu: Number(m[2]), mem: Number(m[3]), comm: m[4] })
+    out.push({ pid: m[1], cpu: Number(m[2]), mem: Number(m[3]), startTime: m[4], comm: m[5] })
   }
   return out
 }
 
 function processRows(processes, query) {
   var values = processes || []
-  var terms = lower(query).trim() ? lower(query).trim().split(/\s+/) : []
+  var terms = normalizeSearch(query).trim() ? normalizeSearch(query).trim().split(/\s+/) : []
   var out = []
   for (var i = 0; i < values.length; i++) {
     var proc = values[i]
-    var haystack = lower(proc.comm) + " " + proc.pid
+    var haystack = normalizeSearch(proc.comm) + " " + proc.pid
     var matched = true
     for (var t = 0; t < terms.length; t++) {
       if (haystack.indexOf(terms[t]) < 0) { matched = false; break }
@@ -2209,7 +2472,7 @@ function processRows(processes, query) {
       primaryLabel: "Terminate",
       secondaryLabel: "Kill",
       order: i,
-      payload: { kind: "process", pid: proc.pid, comm: proc.comm }
+      payload: { kind: "process", pid: proc.pid, comm: proc.comm, startTime: proc.startTime }
     }))
   }
   return out
@@ -2355,7 +2618,7 @@ function aiRows(query, agent) {
 // `@raycast.schemaVersion 1` and `@raycast.title`, commented with `#`, `//`
 // or `--`. Everything else is ignored, so a README in the folder is harmless.
 
-var SCRIPT_MODES = ["silent", "compact", "fullOutput", "inline"]
+var SCRIPT_MODES = ["silent", "compact", "fullOutput", "inline", "results"]
 var SCRIPT_OUTPUT_LIMIT = 65536
 
 function parseRefresh(value) {
@@ -2369,7 +2632,7 @@ function parseScriptCommand(text) {
   var lines = String(text || "").split("\n")
   var meta = ({})
   var args = []
-  var pattern = /^\s*(?:#|\/\/|--)\s*@raycast\.([A-Za-z0-9]+)\s*(.*?)\s*$/
+  var pattern = /^\s*(?:#|\/\/|--)\s*@(?:raycast|omacast)\.([A-Za-z0-9]+)\s*(.*?)\s*$/
 
   for (var i = 0; i < lines.length; i++) {
     var m = lines[i].match(pattern)
@@ -2382,7 +2645,10 @@ function parseScriptCommand(text) {
           type: String(spec.type || "text"),
           placeholder: String(spec.placeholder || "argument" + arg[1]),
           optional: spec.optional === true,
-          percentEncoded: spec.percentEncoded === true
+          percentEncoded: spec.percentEncoded === true,
+          options: Array.isArray(spec.options) ? spec.options.filter(function(option) { return typeof option === "string" || option && typeof option.title === "string" && typeof option.value === "string" }).map(function(option) { return typeof option === "string" ? option : { title: option.title, value: option.value } }) : [],
+          validation: typeof spec.validation === "string" ? spec.validation : "",
+          default: typeof spec.default === "string" ? spec.default : ""
         }
       }
       continue
@@ -2441,7 +2707,7 @@ function shellQuote(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'"
 }
 
-function scriptRows(scripts, query, usage, now, inline, all) {
+function scriptRows(scripts, query, usage, now, inline, all, formsEnabled) {
   var values = scripts || []
   var outputs = inline || ({})
   var q = String(query || "").trim()
@@ -2455,23 +2721,19 @@ function scriptRows(scripts, query, usage, now, inline, all) {
     if (!admission) continue
 
     var typed = admission.direct ? splitArguments(admission.argument) : []
-    var args = []
-    var missing = ""
-    for (var a = 0; a < meta.arguments.length; a++) {
-      var spec = meta.arguments[a]
-      var value = typed[a] !== undefined ? typed[a] : ""
-      if (!value && !spec.optional && !missing) missing = spec.placeholder
-      args.push(spec.percentEncoded ? encodeURIComponent(value) : value)
-    }
+    var validation = ScriptArguments.validateArguments(meta.arguments, typed)
+    var args = validation.args
+    var missing = validation.ok ? "" : validation.error
 
     var placeholders = meta.arguments.map(function(spec) { return "<" + spec.placeholder + ">" }).join(" ")
-    var completing = !admission.direct && meta.arguments.length > 0 && missing !== "" && script.executable
-    var disabled = !script.executable || (admission.direct && missing !== "")
+    var needsForm = formsEnabled !== false && meta.arguments.length > 0 && script.executable && (missing !== "" || !admission.direct)
+    var completing = !needsForm && !admission.direct && meta.arguments.length > 0 && missing !== "" && script.executable
+    var disabled = !script.executable || (!needsForm && admission.direct && missing !== "")
     var key = "sc:" + script.path
     var subtitle = !script.executable
       ? "not executable"
       : (meta.mode === "inline" && outputs[script.path] ? outputs[script.path] : script.keyword + (placeholders ? " " + placeholders : ""))
-    var primary = !script.executable ? "Not executable" : (completing ? "Type keyword" : (disabled ? "Needs " + missing : "Run"))
+    var primary = !script.executable ? "Not executable" : needsForm ? "Set arguments" : (completing ? "Type keyword" : (disabled ? "Needs " + missing : "Run"))
 
     out.push(row({
       key: key,
@@ -2483,12 +2745,13 @@ function scriptRows(scripts, query, usage, now, inline, all) {
       keyword: script.keyword,
       frecencyKey: key,
       pinnable: true,
-      confirm: meta.needsConfirmation && !disabled && !completing,
+      confirm: meta.needsConfirmation && !disabled && !completing && !needsForm,
       primaryLabel: primary,
       score: admission.score + frecencyBonus(usage, key, now),
       order: i,
       payload: {
         kind: "script", path: script.path, mode: meta.mode, title: meta.title, args: args,
+        argumentSpecs: meta.arguments, rawArgs: typed, needsConfirmation: meta.needsConfirmation, needsForm: needsForm,
         keyword: script.keyword, complete: completing, disabled: disabled && !completing,
         preview: { type: "file", path: script.path }
       }
@@ -2507,13 +2770,16 @@ function lastLine(text) {
 //
 // The first two entries are always the row's primary and secondary, so the
 // footer and the panel never disagree about what Enter does.
-function rowActions(item, state) {
+function rowActions(item, state, windowConfig, windowCatalog) {
   if (!item) return []
   var p = item.payload || ({})
   var current = normalizeState(state)
   var out = [{ id: "primary", label: item.primaryLabel, shortcut: "↵" }]
   if (item.secondaryLabel) out.push({ id: "secondary", label: item.secondaryLabel, shortcut: "Ctrl+↵" })
   function add(id, label, shortcut) { out.push({ id: id, label: label, shortcut: shortcut || "" }) }
+  if (p.kind === "window" && p.target) (windowCatalog || (WindowCommands ? WindowCommands.catalog(windowConfig) : [])).forEach(function(action) {
+    add("window:" + action.id, action.title)
+  })
 
   if (p.kind === "app") add("copy-id", "Copy desktop id")
   else if (p.kind === "menu" && p.action) add("copy-command", "Copy command")
@@ -2536,7 +2802,11 @@ function rowActions(item, state) {
   }
 
   if (item.pinnable) add("pin", current.pins.indexOf(item.key) >= 0 ? "Unpin" : "Pin", "Ctrl+.")
-  if (item.frecencyKey && current.usage[item.frecencyKey]) add("reset-ranking", "Reset ranking")
+  if (eligibleLearningKey(item.key)) {
+    add("set-alias", current.aliases[item.key] ? "Change alias" : "Set alias")
+    if (current.aliases[item.key]) add("remove-alias", "Remove alias")
+    if (current.usage[item.frecencyKey || item.key] || Object.keys(current.queryHistory).some(function(hash) { return !!current.queryHistory[hash][item.frecencyKey || item.key] })) add("reset-ranking", "Reset ranking")
+  }
   if (p.kind === "app") add("hide", "Hide")
   return out
 }
@@ -2628,9 +2898,15 @@ function previewText(preview, now) {
 // argv for previews that need a process, or null.
 function previewCommand(preview) {
   if (!preview) return null
-  // A folder lists its entries; `head` on a directory prints nothing.
-  if (preview.type === "file") return ["bash", "-c", 'if [ -d "$1" ]; then ls -1Ap -- "$1" | head -n 200; else head -c ' + PREVIEW_LIMIT + ' -- "$1"; fi', "bash", preview.path]
-  if (preview.type === "content") return ["rg", "-n", "-C", "3", "--max-count", "5", "--fixed-strings", "--ignore-case", "--", preview.term, preview.path]
+  // ls output is display-only; discovery and metadata always use NUL records.
+  if (preview.type === "file") {
+    return boundedCommand("preview", ["bash", "-c",
+      'if [ -d "$1" ]; then ls -1Ap --quoting-style=literal -- "$1" | { n=0; while IFS= read -r line; do if ((n >= 200)); then printf "\\n[Preview truncated]\\n"; exit 3; fi; printf "%s\\n" "$line"; n=$((n + 1)); done; }; s=("${PIPESTATUS[@]}"); if ((s[0] != 0 && s[0] != 141)); then exit 4; fi; exit "${s[1]}"; else exec cat -- "$1"; fi',
+      "bash", preview.path], PREVIEW_LIMIT, 0, false)
+  }
+  if (preview.type === "content") return boundedCommand("preview",
+    ["rg", "-n", "-C", "3", "--max-count", "5", "--fixed-strings", "--ignore-case",
+      "--", preview.term, preview.path], PREVIEW_LIMIT, 0, false)
   return null
 }
 
@@ -3238,7 +3514,7 @@ function normalizeQuicklinks(raw, builtins, hidden) {
     if (typeof entry.name !== "string" || !entry.name) continue
     if (typeof entry.url !== "string" || !entry.url) continue
 
-    var link = { name: entry.name, keyword: normalizeKeyword(entry.keyword), url: entry.url }
+    var link = Object.assign({}, entry, { name: entry.name, keyword: normalizeKeyword(entry.keyword), url: entry.url })
     if (link.keyword && byKeyword[link.keyword] !== undefined) {
       out[byKeyword[link.keyword]] = link
       continue
@@ -3262,7 +3538,7 @@ function normalizeSnippets(raw) {
     if (typeof entry.name !== "string" || !entry.name || seen[entry.name]) continue
     if (typeof entry.text !== "string" || !entry.text) continue
     seen[entry.name] = true
-    out.push({ name: entry.name, keyword: normalizeKeyword(entry.keyword), text: entry.text })
+    out.push(Object.assign({}, entry, { name: entry.name, keyword: normalizeKeyword(entry.keyword), text: entry.text }))
   }
   return out
 }
@@ -3278,13 +3554,13 @@ function normalizeCommands(raw) {
     if (typeof entry.name !== "string" || !entry.name || seen[entry.name]) continue
     if (typeof entry.command !== "string" || !entry.command) continue
     seen[entry.name] = true
-    out.push({
+    out.push(Object.assign({}, entry, {
       name: entry.name,
       keyword: normalizeKeyword(entry.keyword),
       command: entry.command,
       terminal: entry.terminal === true,
       confirm: entry.confirm === true
-    })
+    }))
   }
   return out
 }
@@ -3307,7 +3583,7 @@ function normalizeConfig(raw) {
   // fallback row either, rather than a Google row nobody asked for.
   if (!found) found = quicklinks[0] || null
 
-  return {
+  return Object.assign({}, value, sharedConfig(value), {
     searchEngine: found ? found.keyword : "",
     searchQuicklink: found,
     quicklinks: quicklinks,
@@ -3319,7 +3595,7 @@ function normalizeConfig(raw) {
     currency: value.currency === true,
     ai: value.ai === true,
     scriptDirs: normalizeScriptDirs(value.scriptDirs)
-  }
+  })
 }
 
 // ---- Hyprland bindings block
@@ -3391,20 +3667,40 @@ function barButtonSetting(shellConfig, id) {
 
 // ---- Settings document
 
-var CONFIG_KEYS = ["searchEngine", "builtinQuicklinks", "hiddenQuicklinks", "quicklinks", "snippets", "commands", "scriptDirs", "preview", "currency", "ai"]
+var SHARED_BOOLEAN_DEFAULTS = { queryLearning: false, protectPreviews: true, projectsEnabled: false, zoxideEnabled: false, sshEnabled: false, bookmarksEnabled: false, pluginPanelsEnabled: false, scriptForms: true, inlineAi: false, semantic: false }
+var SHARED_ARRAY_KEYS = ["allowProtectedPaths", "projectRoots", "sshConfigFiles", "bookmarkFiles", "agentCommand"]
+
+function sharedConfig(value) {
+  var next = ({})
+  Object.keys(SHARED_BOOLEAN_DEFAULTS).forEach(function(key) { next[key] = typeof value[key] === "boolean" ? value[key] : SHARED_BOOLEAN_DEFAULTS[key] })
+  SHARED_ARRAY_KEYS.forEach(function(key) {
+    next[key] = (Array.isArray(value[key]) ? value[key] : []).filter(function(entry) { return typeof entry === "string" && entry.indexOf("\u0000") < 0 }).slice(0, 200)
+  })
+  next.fileRoots = (Array.isArray(value.fileRoots) ? value.fileRoots : []).filter(function(entry) { return entry && typeof entry === "object" && !Array.isArray(entry) }).slice(0, 200).map(function(entry) {
+    return Object.assign({}, entry, { name: typeof entry.name === "string" ? entry.name : "", path: typeof entry.path === "string" ? entry.path : "" })
+  })
+  next.semanticEndpoint = typeof value.semanticEndpoint === "string" ? value.semanticEndpoint : "http://127.0.0.1:11434"
+  next.semanticModel = typeof value.semanticModel === "string" ? value.semanticModel : ""
+  return next
+}
+
+var CONFIG_KEYS = ["searchEngine", "builtinQuicklinks", "hiddenQuicklinks", "quicklinks", "snippets", "commands", "scriptDirs", "preview", "currency", "ai", "queryLearning", "fileRoots", "protectPreviews", "allowProtectedPaths", "projectsEnabled", "projectRoots", "zoxideEnabled", "sshEnabled", "sshConfigFiles", "bookmarksEnabled", "bookmarkFiles", "pluginPanelsEnabled", "scriptForms", "inlineAi", "agentCommand", "semantic", "semanticEndpoint", "semanticModel"]
 var LIST_KINDS = {
   quicklinks: { fields: ["name", "keyword", "url"], label: "Quicklink" },
   snippets: { fields: ["name", "keyword", "text"], label: "Snippet" },
-  commands: { fields: ["name", "keyword", "command", "terminal", "confirm"], label: "Command" }
+  commands: { fields: ["name", "keyword", "command", "terminal", "confirm"], label: "Command" },
+  fileRoots: { fields: ["name", "path"], label: "File root" }
 }
 
 function editableConfig(raw) {
   var doc = raw && typeof raw === "object" && !Array.isArray(raw) ? JSON.parse(JSON.stringify(raw)) : ({})
+  delete doc.voice
   doc.searchEngine = typeof doc.searchEngine === "string" ? doc.searchEngine : "g"
   doc.builtinQuicklinks = typeof doc.builtinQuicklinks === "boolean" ? doc.builtinQuicklinks : true
   doc.preview = typeof doc.preview === "boolean" ? doc.preview : true
   doc.currency = doc.currency === true
   doc.ai = doc.ai === true
+  Object.assign(doc, sharedConfig(doc))
   ;["hiddenQuicklinks", "scriptDirs"].forEach(function(key) {
     doc[key] = (Array.isArray(doc[key]) ? doc[key] : []).filter(function(value) { return typeof value === "string" })
   })
@@ -3412,7 +3708,7 @@ function editableConfig(raw) {
     doc[kind] = (Array.isArray(doc[kind]) ? doc[kind] : []).filter(function(entry) {
       return entry && typeof entry === "object" && !Array.isArray(entry)
     }).map(function(entry) {
-      var out = ({})
+      var out = entry
       LIST_KINDS[kind].fields.forEach(function(field) {
         out[field] = field === "terminal" || field === "confirm"
           ? entry[field] === true : typeof entry[field] === "string" ? entry[field] : ""
@@ -3429,7 +3725,7 @@ function updateConfig(raw, op) {
   var kind = Object.prototype.hasOwnProperty.call(LIST_KINDS, op.kind) ? op.kind : ""
   var indexed = kind && Number.isInteger(op.index) && op.index >= 0 && op.index < doc[kind].length
   var dirIndex = Number.isInteger(op.index) && op.index >= 0 && op.index < doc.scriptDirs.length
-  if (op.op === "set" && ["searchEngine", "preview", "currency", "ai", "builtinQuicklinks"].indexOf(op.key) >= 0) {
+  if (op.op === "set" && CONFIG_KEYS.indexOf(op.key) >= 0 && !Object.prototype.hasOwnProperty.call(LIST_KINDS, op.key)) {
     doc[op.key] = op.value
   } else if (op.op === "toggleHidden") {
     var hidden = doc.hiddenQuicklinks.indexOf(op.keyword)
@@ -3490,6 +3786,73 @@ function normalizeChord(text) {
   if (!/^[A-Z0-9]$|^F([1-9]|1[0-9]|2[0-4])$|^(SPACE|RETURN|TAB|ESCAPE|BACKSPACE|DELETE|INSERT|HOME|END|PRIOR|NEXT|LEFT|RIGHT|UP|DOWN|MINUS|EQUAL|COMMA|PERIOD|SLASH|SEMICOLON|APOSTROPHE|GRAVE|BRACKETLEFT|BRACKETRIGHT|BACKSLASH|PRINT)$/.test(key)) return ""
   if (tokens.some(function(token) { return ["SUPER", "CTRL", "ALT", "SHIFT"].indexOf(token) < 0 })) return ""
   return tokens.concat([key]).join(" + ")
+}
+
+// Compare against a fresh hyprctl inventory and the saved blocks, which may
+// already contain a change that the compositor has not reloaded yet.
+function shortcutConflict(chord, owner, live, windowBinds, binds, records) {
+  var normalized = normalizeChord(chord)
+  if (!normalized) return "Invalid shortcut"
+  if (!Array.isArray(live)) return "Could not inspect Hyprland shortcuts; shortcut was not saved"
+  var modifiers = { SHIFT: 1, CTRL: 4, ALT: 8, SUPER: 64 }
+  function identity(value) {
+    var parts = normalizeChord(value).split(" + ")
+    var key = parts.pop(), mask = 0
+    parts.forEach(function(part) { mask |= modifiers[part] })
+    return { key: key, mask: mask }
+  }
+  var wanted = identity(normalized)
+  var owned = [
+    { owner: "palette", chord: binds && binds.palette, description: "OmaCast" },
+    { owner: "clipboard", chord: binds && binds.clipboard ? CLIPBOARD_CHORD : "", description: "OmaCast clipboard" }
+  ]
+  Object.keys(windowBinds || {}).forEach(function(action) {
+    owned.push({ owner: "window:" + action, chord: windowBinds[action], description: "OmaCast " + action })
+  })
+  var own = null
+  for (var i = 0; i < owned.length; i++) {
+    var entry = owned[i]
+    if (entry.owner === owner) own = entry
+    if (!entry.chord || entry.owner === owner) continue
+    var saved = identity(entry.chord)
+    if (saved.key === wanted.key && saved.mask === wanted.mask)
+      return normalized + " is already bound to " + entry.description
+  }
+  var excludedOwn = false
+  for (var j = 0; j < live.length; j++) {
+    var binding = live[j]
+    if (!binding || typeof binding !== "object" || !Number.isInteger(binding.modmask)
+      || typeof binding.key !== "string" || typeof binding.submap !== "string")
+      return "Could not inspect Hyprland shortcuts; invalid binding inventory"
+    var universal = binding.submap_universal === true || binding.submap_universal === "true"
+    if (binding.submap && binding.submap !== "default" && !universal) continue
+    if (binding.modmask !== wanted.mask) continue
+    var key = binding.key.toUpperCase().split(" + ").pop()
+    var keycodeOnly = !key || key.indexOf("CODE:") === 0 || Number(binding.keycode) > 0
+    if (keycodeOnly && !binding.catch_all) {
+      var resolved = (records || []).filter(function(record) {
+        var candidate = identity(record.combo)
+        return binding.description && record.label === binding.description && candidate.mask === binding.modmask && candidate.key
+      })
+      if (resolved.length === 1) {
+        key = identity(resolved[0].combo).key
+        keycodeOnly = false
+      }
+    }
+    if (!binding.catch_all && !keycodeOnly && key !== wanted.key) continue
+    var description = binding.description || [binding.dispatcher, binding.arg].filter(Boolean).join(" ") || "an existing shortcut"
+    var current = own && own.chord ? identity(own.chord) : null
+    if (!excludedOwn && !binding.catch_all && !keycodeOnly && !binding.release
+      && !universal && (!binding.submap || binding.submap === "default")
+      && current && current.key === wanted.key && current.mask === wanted.mask
+      && binding.description === own.description) {
+      excludedOwn = true
+      continue
+    }
+    if (keycodeOnly && !binding.catch_all) return "Could not verify " + normalized + " against " + description + " (unresolved physical keycode); shortcut was not saved"
+    return normalized + " is already bound to " + description
+  }
+  return ""
 }
 
 function normalizeScriptDirs(raw) {
@@ -3606,6 +3969,16 @@ function parseEmojis(raw) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    normalizeSearch: normalizeSearch,
+    eligibleLearningKey: eligibleLearningKey,
+    aliasTarget: aliasTarget,
+    setAlias: setAlias,
+    clearAlias: clearAlias,
+    recordQueryUse: recordQueryUse,
+    queryBonus: queryBonus,
+    clearQueryHistory: clearQueryHistory,
+    personalizeRows: personalizeRows,
+    boundedCommand: boundedCommand,
     buildMenuIndex: buildMenuIndex,
     configRows: configRows,
     prepareFields: prepareFields,
@@ -3652,6 +4025,9 @@ if (typeof module !== "undefined") {
     FILE_CANDIDATE_LIMIT: FILE_CANDIDATE_LIMIT,
     fileCommand: fileCommand,
     fileStatCommand: fileStatCommand,
+    parseFilePaths: parseFilePaths,
+    contentCommand: contentCommand,
+    pasteCommand: pasteCommand,
     parseFileRecords: parseFileRecords,
     fileRows: fileRows,
     rankFile: rankFile,
@@ -3684,6 +4060,7 @@ if (typeof module !== "undefined") {
     unescapeMultiline: unescapeMultiline,
     validateField: validateField,
     normalizeChord: normalizeChord,
+    shortcutConflict: shortcutConflict,
     isSettingsScope: isSettingsScope,
     filterSettingsRows: filterSettingsRows,
     settingsRows: settingsRows,

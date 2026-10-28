@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Read newline choices from stdin; print only the literal selected value."""
+import argparse
+import contextlib
+import json
+import os
+import secrets
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+sys.dont_write_bytecode = True
+from omacast_adapter import LIMIT, read_private, runtime
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prompt', default='Select an item')
+    parser.add_argument('--timeout', type=int, default=120)
+    parser.add_argument('--json', action='store_true', help='Read a JSON array of {id,title,subtitle?,value} instead of newline choices')
+    args = parser.parse_args()
+    if not 1 <= args.timeout <= 300:
+        parser.error('--timeout must be 1–300 seconds')
+    raw = sys.stdin.buffer.read(LIMIT + 1)
+    if len(raw) > LIMIT:
+        parser.error('input exceeds 64 KiB')
+    if args.json:
+        items = json.loads(raw)
+    else:
+        items = [{'id': str(index), 'title': value, 'subtitle': '', 'value': value}
+                 for index, value in enumerate(raw.decode('utf-8').splitlines())]
+    if not isinstance(items, list) or not 1 <= len(items) <= 200:
+        parser.error('provide 1–200 choices')
+    seen = set()
+    for row in items:
+        if not isinstance(row, dict) or not all(isinstance(row.get(k), str) for k in ('id', 'title', 'value')) or row['id'] in seen or len(row['value'].encode()) > 8192:
+            parser.error('invalid or duplicate choice')
+        seen.add(row['id'])
+    folder = tempfile.mkdtemp(prefix='omacast-picker-', dir=runtime())
+    identity = secrets.token_hex(16)
+    doc = {'version': 1, 'id': identity, 'prompt': args.prompt[:1024], 'items': items, 'deadline': time.time() + args.timeout}
+    try:
+        path = os.path.join(folder, 'request.json')
+        encoded = json.dumps(doc).encode()
+        if len(encoded) > LIMIT:
+            parser.error('encoded request exceeds 64 KiB')
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(encoded)
+        subprocess.run(['omarchy-shell', 'shell', 'summon', 'io.github.terrifiedbug.omacast',
+                        json.dumps({'pickerPath': path})], check=True, timeout=5,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        while time.time() < doc['deadline']:
+            try:
+                result = read_private(os.path.join(folder, 'response.json'))
+                if result.get('id') != identity:
+                    raise ValueError('response identity changed')
+                if result.get('cancelled'):
+                    return 130
+                value = result.get('value')
+                if not isinstance(value, str) or value not in [r['value'] for r in items]:
+                    raise ValueError('invalid response value')
+                sys.stdout.write(value + '\n')
+                return 0
+            except (FileNotFoundError, json.JSONDecodeError):
+                time.sleep(.04)
+        print('Picker timed out', file=sys.stderr)
+        return 124
+    finally:
+        shutil.rmtree(folder)
+
+
+if __name__ == '__main__':
+    def interrupted(signum, frame):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)
+    except Exception as error:
+        print('omacast-pick: ' + str(error), file=sys.stderr)
+        sys.exit(1)

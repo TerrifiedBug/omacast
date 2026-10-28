@@ -37,5 +37,48 @@
   // rates at most once a day; "ai" adds an "Ask <agent>" row that hands the
   // query to `omarchy agent prompt`.
   "currency": false,
-  "ai": false
+  "ai": false,
+
+  // Disabled until enabled in Settings > Window management.
+  // Empty assignments leave native layouts alone. Assign a preset in the palette.
+  "windowManagement": {
+    "enabled": false,
+    "monitors": {},
+    "workspaces": {},
+    "customSizes": []
+  },
+
+  // Aliases are set per result through Ctrl+K. Query learning is separate,
+  // off by default, and stores bounded hashed contexts in private state.
+  "queryLearning": false,
+
+  // Empty means Home. Include Home explicitly when adding other roots:
+  // [{"name":"Home","path":"~"},{"name":"Work","path":"~/work"}]
+  "fileRoots": [],
+  "protectPreviews": true,
+  // Explicit file or directory allowances for protected content/previews.
+  "allowProtectedPaths": [],
+
+  // Local navigation sources. Disabled sources do no discovery.
+  "projectsEnabled": false,
+  "projectRoots": [],
+  "zoxideEnabled": false,
+  "sshEnabled": false,
+  // Enabled with an empty list uses ~/.ssh/config and bounded local Includes.
+  "sshConfigFiles": [],
+  "bookmarksEnabled": false,
+  // Explicit Chromium JSON or Firefox bookmark-export JSON files.
+  "bookmarkFiles": [],
+  "pluginPanelsEnabled": false,
+
+  "scriptForms": true,
+  // Explicit send only. The default isolated omp command needs exported
+  // provider credentials; it doesn't inherit normal stored login/config files.
+  "inlineAi": false,
+  // An explicit trusted command receives the question as its last argument.
+  "agentCommand": [],
+  // Real embeddings from a loopback-only service. No request without a model.
+  "semantic": false,
+  "semanticEndpoint": "http://127.0.0.1:11434",
+  "semanticModel": ""
 }

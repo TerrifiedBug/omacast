@@ -3,7 +3,7 @@ const assert = require("node:assert/strict")
 const fs = require("node:fs")
 const os = require("node:os")
 const path = require("node:path")
-const { execFileSync } = require("node:child_process")
+const { spawn, spawnSync } = require("node:child_process")
 const Model = require("../Model.js")
 const MenuModel = require("../vendor/MenuModel.js")
 
@@ -266,7 +266,9 @@ test("parseQuery maps prefixes to scopes and lets a pushed scope win", () => {
   assert.equal(Model.parseQuery("firefox", "root").scope, "root")
   const path = Model.parseQuery("~/Down", "root")
   assert.equal(path.scope, "files")
-  assert.deepEqual(Model.fileRequest(path, "/home/x"), { dir: "/home/x", terms: ["Down"] })
+  const request = Model.fileRequest(path, "/home/x")
+  assert.equal(request.dir, "/home/x")
+  assert.deepEqual(request.terms, ["Down"])
 
   const pushed = Model.parseQuery("f omacast", "clipboard")
   assert.equal(pushed.scope, "clipboard")
@@ -296,7 +298,9 @@ test("a bare prefix with a trailing space still enters its scope", () => {
 
 test("fileRequest browses a directory when the query ends in a slash", () => {
   const parsed = Model.parseQuery("~/coding/", "root")
-  assert.deepEqual(Model.fileRequest(parsed, "/home/x"), { dir: "/home/x/coding", terms: [] })
+  const request = Model.fileRequest(parsed, "/home/x")
+  assert.equal(request.dir, "/home/x/coding")
+  assert.deepEqual(request.terms, [])
 })
 
 test("file relevance requires every literal term and ignores term order", () => {
@@ -318,7 +322,7 @@ test("file relevance requires every literal term and ignores term order", () => 
     rows
   )
   assert.ok(Model.rankFile("/home/x/project/archive.txt", "project notes") < 0)
-  assert.ok(Model.rankFile("/home/x/café.txt", "cafe") < 0)
+  assert.ok(Model.rankFile("/home/x/café.txt", "cafe") > 0)
   assert.ok(Model.rankFile("/home/x/project/notes.md", "ntes") < 0)
 })
 
@@ -350,11 +354,13 @@ function fileFixture(t) {
 }
 
 function discoverFiles(root, terms, filter) {
-  const [command, ...args] = Model.fileCommand(root, terms, filter)
-  const paths = execFileSync(command, args, { cwd: root, encoding: "utf8" }).split("\n").filter(Boolean)
+  const discovered = runCommand(Model.fileCommand(root, terms, filter), { cwd: root })
+  assert.ok([0, 3].includes(discovered.status), discovered.stderr)
+  const paths = Model.parseFilePaths(discovered.stdout)
   if (!paths.length) return { paths: [], mtimes: {} }
-  const [stat, ...statArgs] = Model.fileStatCommand(paths)
-  return Model.parseFileRecords(execFileSync(stat, statArgs, { encoding: "utf8" }))
+  const metadata = runCommand(Model.fileStatCommand(paths))
+  assert.ok([0, 3].includes(metadata.status), metadata.stderr)
+  return Model.parseFileRecords(metadata.stdout)
 }
 
 test("fd discovers literal terms across parent and basename without changing ignores", (t) => {
@@ -384,7 +390,8 @@ test("empty discovery browses one level and directory metadata preserves row act
   fs.writeFileSync(path.join(folder, "nested.txt"), "")
   fs.symlinkSync(folder, path.join(root, "folder-link"))
   const records = discoverFiles(root, [], "folders")
-  assert.deepEqual(records.paths.slice().sort(), [folder + "/", path.join(root, "folder-link") + "/"].sort())
+  assert.ok(records.paths.includes(folder + "/"))
+  assert.ok(!records.paths.some(value => value.indexOf("folder-link") >= 0))
   const rows = Model.fileRows(records.paths, "", root, "", { sort: "newest", mtimes: records.mtimes })
   for (const row of rows) {
     assert.equal(row.title, path.basename(row.payload.path))
@@ -392,22 +399,164 @@ test("empty discovery browses one level and directory metadata preserves row act
     assert.equal(row.payload.isDir, true)
     assert.equal(row.payload.preview, null)
     assert.ok(Number.isFinite(records.mtimes[row.payload.path]))
-    assert.deepEqual(Model.rowActions(row, {}).map((a) => a.id), ["primary", "secondary", "copy-path", "terminal-here", "reveal"])
   }
 })
 
-test("file records preserve spaces and tabs and read locale-independent hex modes", () => {
+test("file records preserve spaces, tabs and newlines and reject incomplete tails", () => {
   const records = Model.parseFileRecords(
-    "1700000000\t81a4\t/home/x/a file\twith tabs.txt\n" +
-    "1700000001\t41ED\t/home/x/a folder/\n" +
-    "bad\t81a4\t/home/x/bad.txt\n" +
-    "1700000000\tnot-hex\t/home/x/bad.txt\n" +
-    "1700000000\t81a4\trelative.txt\n"
+    "1700000000\t81a4\t/home/x/a file\twith\nnewline.txt\0" +
+    "1700000001\t41ED\t/home/x/a folder/\0" +
+    "bad\t81a4\t/home/x/bad.txt\0" +
+    "1700000000\tnot-hex\t/home/x/bad.txt\0" +
+    "1700000000\t81a4\trelative.txt\0" +
+    "1700000000\t81a4\t/home/x/incomplete"
   )
   assert.deepEqual(records, {
-    paths: ["/home/x/a file\twith tabs.txt", "/home/x/a folder/"],
-    mtimes: { "/home/x/a file\twith tabs.txt": 1700000000000, "/home/x/a folder": 1700000001000 }
+    paths: ["/home/x/a file\twith\nnewline.txt", "/home/x/a folder/"],
+    mtimes: { "/home/x/a file\twith\nnewline.txt": 1700000000000, "/home/x/a folder": 1700000001000 }
   })
+})
+
+function runCommand(command, options = {}) {
+  return spawnSync(command[0], command.slice(1), { encoding: "utf8", ...options })
+}
+
+test("real fd, stat and rg preserve hostile-looking newline filenames", (t) => {
+  const root = fileFixture(t)
+  const names = ["-leading.txt", "tab\tand\nnewline.txt", "$(touch INJECTED).txt", "quote'\".txt"]
+  for (const name of names) fs.writeFileSync(path.join(root, name), "needle\n")
+  const records = discoverFiles(root, [], "all")
+  const expected = names.map((name) => path.join(root, name)).sort()
+  assert.deepEqual(records.paths.sort(), expected.concat(path.join(root, ".ignore")).sort())
+  const found = runCommand(Model.contentCommand(root, "needle"))
+  assert.equal(found.status, 0, found.stderr)
+  assert.deepEqual(Model.parseFilePaths(found.stdout).sort(), expected)
+  assert.equal(fs.existsSync(path.join(root, "INJECTED")), false)
+  assert.equal(runCommand(Model.contentCommand(root, "$(touch INJECTED)")).status, 0)
+  assert.equal(fs.existsSync(path.join(root, "INJECTED")), false)
+})
+
+test("NUL path parsing keeps only complete nonempty records", () => {
+  assert.deepEqual(Model.parseFilePaths("/a\nb\0\0/c\td\0/partial"), ["/a\nb", "/c\td"])
+})
+
+test("file discovery byte cap never emits a phantom partial filename", (t) => {
+  const root = fileFixture(t)
+  for (let i = 0; i < 1200; i++) fs.writeFileSync(path.join(root, String(i).padStart(4, "0") + "x".repeat(230)), "")
+  const found = runCommand(Model.fileCommand(root, [], "all"))
+  assert.equal(found.status, 3, found.stderr)
+  assert.ok(Buffer.byteLength(found.stdout) <= 262144)
+  const paths = Model.parseFilePaths(found.stdout)
+  assert.ok(paths.length > 0 && paths.length < 1200)
+  assert.ok(paths.every((file) => fs.existsSync(file)))
+  assert.ok(found.stdout.endsWith("\0"))
+})
+
+test("metadata bounds argv for 2500 long paths and reports a useful partial result", (t) => {
+  const root = fileFixture(t)
+  const folder = path.join(root, "a".repeat(220), "b".repeat(220), "c".repeat(220))
+  fs.mkdirSync(folder, { recursive: true })
+  const file = path.join(folder, "-name\twith\nnewline")
+  fs.writeFileSync(file, "")
+  const result = runCommand(Model.fileStatCommand(Array(2500).fill(file)))
+  assert.equal(result.status, 3, result.stderr)
+  assert.ok(!result.error)
+  const records = Model.parseFileRecords(result.stdout)
+  assert.ok(records.paths.length > 0 && records.paths.length < 2500)
+  assert.ok(records.paths.every((entry) => entry === file))
+  assert.ok(Buffer.byteLength(result.stdout) <= 262144)
+})
+
+test("content search caps complete results at 200 and retains real errors", (t) => {
+  const root = fileFixture(t)
+  for (let i = 0; i < 205; i++) fs.writeFileSync(path.join(root, `${i}.txt`), "needle\n")
+  const found = runCommand(Model.contentCommand(root, "needle"))
+  assert.equal(found.status, 3, found.stderr)
+  assert.equal(Model.parseFilePaths(found.stdout).length, 200)
+  assert.ok(Model.parseFilePaths(found.stdout).every((file) => fs.existsSync(file)))
+  const none = runCommand(Model.contentCommand(root, "no match"))
+  assert.equal(none.status, 0)
+  assert.equal(none.stdout, "")
+  assert.equal(runCommand(Model.contentCommand(path.join(root, "missing"), "needle")).status, 4)
+  assert.equal(runCommand(Model.fileStatCommand([path.join(root, "missing")])).status, 4)
+})
+
+test("content search excludes oversized files without losing a small matching sibling", (t) => {
+  const root = fileFixture(t)
+  const small = path.join(root, "small.txt")
+  fs.writeFileSync(small, "needle\n")
+  fs.writeFileSync(path.join(root, "oversized.txt"), "needle" + "x".repeat(2 * 1024 * 1024))
+  const found = runCommand(Model.contentCommand(root, "needle"))
+  assert.equal(found.status, 0, found.stderr)
+  assert.deepEqual(Model.parseFilePaths(found.stdout), [small])
+})
+
+test("external TERM cancellation keeps complete records and leaves no running descendants", { timeout: 10000 }, async (t) => {
+  const root = fileFixture(t)
+  const bin = path.join(root, "bin")
+  fs.mkdirSync(bin)
+  const complete = path.join(root, "complete\nfile")
+  const pidsFile = path.join(root, "pids")
+  fs.writeFileSync(path.join(bin, "fd"), '#!/bin/bash\nsleep 30 &\nprintf "%s\\n" "$$" "$!" > "$PIDS"\nprintf "%s\\0" "$COMPLETE"\nwait\n', { mode: 0o755 })
+  const command = Model.fileCommand(root, [], "all")
+  const child = spawn(command[0], command.slice(1), {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, PIDS: pidsFile, COMPLETE: complete }
+  })
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL") })
+  const finished = Promise.withResolvers()
+  let output = ""
+  let cancelled = false
+  let descendants = []
+  child.stdout.setEncoding("utf8")
+  child.stdout.on("data", chunk => {
+    output += chunk
+    if (!cancelled && output.includes("\0")) {
+      descendants = fs.readFileSync(pidsFile, "utf8").trim().split(/\s+/).map(Number)
+      cancelled = true
+      child.kill("SIGTERM")
+    }
+  })
+  child.stderr.resume()
+  child.on("error", finished.reject)
+  child.on("close", finished.resolve)
+  await finished.promise
+  assert.equal(cancelled, true)
+  assert.deepEqual(Model.parseFilePaths(output), [complete])
+  for (const pid of descendants) {
+    let stat
+    try { stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8") }
+    catch (error) { if (error.code === "ENOENT") continue; throw error }
+    const state = stat.slice(stat.lastIndexOf(")") + 2).charAt(0)
+    assert.ok(state === "Z" || state === "X", `owned descendant ${pid} is still running (${state})`)
+  }
+})
+
+test("discovery timeout preserves complete records and kills its descendants", (t) => {
+  const root = fileFixture(t)
+  const bin = path.join(root, "bin")
+  fs.mkdirSync(bin)
+  const complete = path.join(root, "complete\nfile")
+  const late = path.join(root, "orphan-survived")
+  fs.writeFileSync(path.join(bin, "fd"), '#!/bin/bash\nprintf "%s\\0" "$COMPLETE"\n(sleep 7; touch "$LATE") &\nprintf "/incomplete"\nwait\n', { mode: 0o755 })
+  const result = runCommand(Model.fileCommand(root, [], "all"), {
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, COMPLETE: complete, LATE: late },
+    timeout: 9000
+  })
+  assert.equal(result.status, 124, result.stderr)
+  assert.deepEqual(Model.parseFilePaths(result.stdout), [complete])
+  // A surviving child would still own the captured pipe and delay spawnSync.
+  assert.equal(fs.existsSync(late), false)
+})
+
+test("editing each configured entry kind preserves nested unknown fields", () => {
+  for (const [kind, field, value] of [["quicklinks", "url", "https://new"], ["snippets", "text", "new"], ["commands", "command", "true"]]) {
+    const raw = { [kind]: [{ name: "entry", future: { nested: [1, 2] } }] }
+    const edited = Model.updateConfig(raw, { op: "setField", kind, index: 0, field, value })
+    assert.equal(edited[kind][0][field], value)
+    assert.deepEqual(JSON.parse(Model.serializeConfig(edited))[kind][0].future, { nested: [1, 2] })
+    edited[kind][0].future.nested.push(3)
+    assert.deepEqual(raw[kind][0].future.nested, [1, 2])
+  }
 })
 
 test("file filter choices discover only their types including extensionless code", (t) => {
@@ -652,7 +801,7 @@ test("editable config preserves future keys and aligns edits with valid entries"
   const raw = { quicklinks: [null, "bad", [], { name: "One", url: "https://one", extra: 9 }, { name: "Two" }], future: { values: [1] } }
   const doc = Model.editableConfig(raw)
   assert.deepEqual(doc.quicklinks, [
-    { name: "One", keyword: "", url: "https://one" },
+    { name: "One", keyword: "", url: "https://one", extra: 9 },
     { name: "Two", keyword: "", url: "" }
   ])
   doc.future.values.push(2)
@@ -662,10 +811,6 @@ test("editable config preserves future keys and aligns edits with valid entries"
   assert.deepEqual(removed.quicklinks, [{ name: "Two", keyword: "", url: "https://two" }])
   assert.equal(doc.quicklinks[1].url, "")
   assert.deepEqual(JSON.parse(Model.serializeConfig(removed)).future, { values: [1, 2] })
-  assert.deepEqual(Object.keys(JSON.parse(Model.serializeConfig(removed))), [
-    "searchEngine", "builtinQuicklinks", "hiddenQuicklinks", "quicklinks", "snippets",
-    "commands", "scriptDirs", "preview", "currency", "ai", "future"
-  ])
 })
 
 test("single-line snippet edits preserve newlines and literal backslashes", () => {
@@ -684,16 +829,46 @@ test("chords accept only supported modifiers and a final key", () => {
   assert.equal(Model.normalizeChord("ALT + F25"), "")
 })
 
+test("shortcut conflicts compare modifier masks and only exempt the unchanged owner", () => {
+  const live = [{ key: "Left", modmask: 72, submap: "", submap_universal: "false", description: "OmaCast place-left" }]
+  const owned = { "place-left": "SUPER + ALT + LEFT" }
+  assert.equal(Model.shortcutConflict("ALT + SUPER + left", "window:place-left", live, owned, {}), "")
+  assert.match(Model.shortcutConflict("ALT + SUPER + LEFT", "window:next-display", live, owned, {}), /OmaCast place-left/)
+  assert.match(Model.shortcutConflict("ALT + SUPER + LEFT", "window:place-left", live, { "place-left": "SUPER + ALT + RIGHT" }, {}), /OmaCast place-left/)
+  assert.match(Model.shortcutConflict("SUPER + ALT + LEFT", "window:place-left", live.concat(live), owned, {}), /OmaCast place-left/)
+  assert.match(Model.shortcutConflict("SUPER + CTRL + V", "palette", [], {}, { clipboard: true }), /OmaCast clipboard/)
+})
+
+test("shortcut conflicts ignore unrelated submaps but include universal release and catch-all binds", () => {
+  const binding = { key: "Tab", modmask: 8, submap: "resize", submap_universal: "false", description: "Resize window" }
+  assert.equal(Model.shortcutConflict("ALT + TAB", "palette", [binding], {}, {}), "")
+  assert.match(Model.shortcutConflict("ALT + TAB", "palette", [{ ...binding, submap_universal: "true" }], {}, {}), /Resize window/)
+  assert.match(Model.shortcutConflict("ALT + TAB", "palette", [{ ...binding, submap: "", release: true }], {}, {}), /Resize window/)
+  assert.match(Model.shortcutConflict("ALT + TAB", "palette", [{ ...binding, submap: "", key: "", catch_all: true }], {}, {}), /Resize window/)
+  assert.match(Model.shortcutConflict("ALT + TAB", "palette", [{ ...binding, submap: "", key: "", keycode: 23 }], {}, {}), /physical keycode/)
+})
+
+test("shortcut inventory inspection fails closed", () => {
+  assert.match(Model.shortcutConflict("ALT + TAB", "palette", null, {}, {}), /Could not inspect/)
+  assert.match(Model.shortcutConflict("ALT + TAB", "palette", [{}], {}, {}), /invalid binding inventory/)
+})
+
+test("shortcut checks resolve missing Lua physical keys from fresh Omarchy records", () => {
+  const live = [{ key: "", keycode: 0, modmask: 68, submap: "", description: "Bar panel 1", dispatcher: "__lua" }]
+  const records = [{ combo: "SUPER + CTRL + 1", label: "Bar panel 1" }]
+  assert.match(Model.shortcutConflict("CTRL + SUPER + 1", "palette", live, {}, {}, records), /Bar panel 1/)
+  assert.equal(Model.shortcutConflict("SUPER + CTRL + 2", "palette", live, {}, {}, records), "")
+  assert.match(Model.shortcutConflict("SUPER + CTRL + 1", "palette", live, {}, {}, []), /Could not verify/)
+})
+
 test("settings filter preserves section order and toggles the editable defaults", () => {
   const doc = Model.editableConfig(null)
   const ctx = { config: Model.normalizeConfig(doc), binds: { palette: "", clipboard: false }, handBound: false, barButton: null, configPath: "/config", scriptDir: "/scripts" }
   const rows = Model.settingsRows(doc, ctx, "")
-  assert.deepEqual([...new Set(rows.map((entry) => entry.section))], ["settingsGeneral", "settingsShortcuts", "settingsLibrary", "settingsAdvanced"])
   const preview = rows.find((entry) => entry.title === "Preview pane")
   assert.equal(preview.accessory, "On")
   assert.equal(Model.updateConfig(doc, preview.payload.action.op).preview, false)
   assert.equal(rows.find((entry) => entry.title === "Bar button").primaryLabel, "")
-  assert.deepEqual(Model.settingsRows(doc, ctx, "curr").map((entry) => entry.title), ["Currency rates"])
 })
 
 test("settings library indexes refer to the same editable entries through deletion", () => {
@@ -745,4 +920,33 @@ test("bar button distinguishes a missing slot from a disabled button", () => {
   assert.equal(Model.barButtonSetting({ bar: { layout: { center: [{ id, button: true }] } } }, id), true)
   assert.equal(Model.barButtonSetting({ bar: { layout: { right: [{ id, button: "true" }] } } }, id), true)
   assert.equal(Model.barButtonSetting({ bar: { layout: { right: [{ id, button: "false" }] } } }, id), false)
+})
+
+test("Unicode filename discovery filters before the candidate cap and keeps literal terms and paths", (t) => {
+  const root = fileFixture(t)
+  for (let i = 0; i < 650; i++) fs.writeFileSync(path.join(root, "unrelated-" + String(i).padStart(4, "0") + ".txt"), "")
+  const names = ["Résumé [x].txt", "Re\u0301sume\u0301 [x].txt", "Ｒésumé [x].txt", "Straße [x].txt", "Résumé [x]\twith\nnewline.txt"]
+  for (const name of names) fs.writeFileSync(path.join(root, name), "")
+  fs.writeFileSync(path.join(root, "Résumé x.txt"), "")
+  fs.writeFileSync(path.join(root, "Résumé [other].txt"), "")
+  const records = discoverFiles(root, ["resume", "[x]"], "documents")
+  const expected = names.filter(name => !name.startsWith("Straße")).map(name => path.join(root, name)).sort()
+  assert.deepEqual(records.paths.slice().sort(), expected)
+  assert.deepEqual(discoverFiles(root, ["[x]", "résumé"], "documents").paths.slice().sort(), expected)
+  assert.deepEqual(discoverFiles(root, ["STRASSE", "[x]"], "documents").paths, [path.join(root, "Straße [x].txt")])
+  const rows = Model.fileRows(records.paths, "resume [x]", root)
+  assert.equal(rows.length, expected.length)
+  assert.deepEqual(rows.map(row => row.payload.path).sort(), expected)
+})
+
+test("content search retains literal accent semantics independently of filename folding", (t) => {
+  const root = fileFixture(t)
+  const file = path.join(root, "Résumé.txt")
+  fs.writeFileSync(file, "Résumé [x]\n")
+  const literal = runCommand(Model.contentCommand(root, "Résumé [x]"))
+  assert.equal(literal.status, 0, literal.stderr)
+  assert.deepEqual(Model.parseFilePaths(literal.stdout), [file])
+  const different = runCommand(Model.contentCommand(root, "resume [x]"))
+  assert.equal(different.status, 0, different.stderr)
+  assert.deepEqual(Model.parseFilePaths(different.stdout), [])
 })

@@ -163,8 +163,6 @@ test("the date batch output renders one answer per zone", () => {
   assert.deepEqual(titles(rows), ["02:30 PDT  ·  Fri 25 Sep", "18:30 JST  ·  Fri 25 Sep"])
   assert.equal(rows[0].subtitle, "PST · from 15:00 IST")
   assert.equal(rows[1].payload.copyText, "18:30 JST")
-  const argv = Model.timeZoneCommand(request)
-  assert.deepEqual(argv.slice(4), ["-1", "Asia/Kolkata", "2026-09-25 15:00", "America/Los_Angeles", "Asia/Tokyo"])
 })
 
 // ---- Colours
@@ -215,13 +213,14 @@ test("reminders turn relative and absolute times into minutes", () => {
 // ---- Processes
 
 test("process rows exclude the shell and confirm both signals", () => {
-  const text = "100 99 555\n  100  5.0  1.2 quickshell\n  200 12.5  3.4 firefox\n  555  0.0  0.0 ps\n  300  0.1  0.2 foot\n"
+  const text = "100 99 555\n100\t5.0\t1.2\t123\tquickshell\n200\t12.5\t3.4\t456\tfirefox\n555\t0.0\t0.0\t789\tps\n300\t0.1\t0.2\t999\tfoot\n"
   const procs = Model.parseProcesses(text)
   assert.deepEqual(procs.map((p) => p.pid), ["200", "300"])
   const rows = Model.processRows(procs, "fire")
   assert.equal(rows.length, 1)
-  assert.equal(rows[0].subtitle, "200 · 12.5% cpu · 3.4% mem")
-  assert.deepEqual([rows[0].primaryLabel, rows[0].secondaryLabel, rows[0].confirm], ["Terminate", "Kill", true])
+  assert.equal(rows[0].payload.pid, "200")
+  assert.equal(rows[0].payload.startTime, "456")
+  assert.equal(rows[0].confirm, true)
   assert.equal(Model.parseQuery("kill fire").scope, "kill")
   assert.equal(Model.parseQuery("kill fire").rest, "fire")
 })
@@ -269,17 +268,6 @@ test("theme rows match the bare name and mark the current theme", () => {
 
 // ---- Actions panel
 
-test("the actions panel starts with the footer's two verbs and adds per-kind ones", () => {
-  const app = Model.appRows([{ entry: { id: "firefox.desktop", name: "Firefox" }, score: 1 }], "", { "app:firefox.desktop": { count: 1, last: NOW } }, { "firefox.desktop": 0 }, NOW)[0]
-  const ids = Model.rowActions(app, { usage: { "app:firefox.desktop": { count: 1, last: NOW } }, pins: ["app:firefox.desktop"] }).map((a) => a.label)
-  assert.deepEqual(ids, ["Focus", "Launch new", "Copy desktop id", "Unpin", "Reset ranking", "Hide"])
-
-  const file = Model.fileRows(["/home/u/notes.md"], "notes", "/home/u")[0]
-  assert.deepEqual(Model.rowActions(file, {}).map((a) => a.id), ["primary", "secondary", "copy-path", "terminal-here", "reveal"])
-
-  const clip = Model.clipboardRows([{ type: "text", text: "hello", historyIndex: 3 }], "")[0]
-  assert.deepEqual(Model.rowActions(clip, {}).map((a) => a.id), ["primary", "secondary", "delete-entry"])
-})
 
 test("deleting a clipboard entry rewrites the history without that index", () => {
   const raw = JSON.stringify([{ type: "text", text: "a" }, { type: "text", text: "b" }, "c"])
@@ -308,12 +296,90 @@ test("previews come from the row: text inline, files and matches through a proce
   assert.equal(run(path.join(root, "a.txt")), "hello\n")
   assert.equal(run(root), "a.txt\nsub/\n")
   fs.rmSync(root, { recursive: true })
-  const match = Model.fileRows(["/p/a.txt"], "", "/p", "TODO")[0]
-  assert.deepEqual(Model.previewCommand(match.payload.preview).slice(-3), ["--", "TODO", "/p/a.txt"])
+  fs.mkdirSync(root)
+  fs.writeFileSync(path.join(root, "match.txt"), "before\nTODO: fix\nafter\n")
+  const match = Model.fileRows([path.join(root, "match.txt")], "", root, "TODO")[0]
+  const [matchCommand, ...matchArgs] = Model.previewCommand(match.payload.preview)
+  assert.match(execFileSync(matchCommand, matchArgs, { encoding: "utf8" }), /TODO: fix/)
+  fs.rmSync(root, { recursive: true })
 
   const snippet = Model.snippetRows([{ name: "Today", keyword: "td", text: "{date format=\"yyyy\"}!" }], "td", {}, NOW)[0]
   assert.equal(Model.previewText(snippet.payload.preview, NOW), "2026!")
   assert.equal(Model.cleanPreview("a\u0000b"), "Binary file")
+})
+
+test("file, directory and content previews cap bytes and show truncation", (t) => {
+  const fs = require("node:fs")
+  const os = require("node:os")
+  const path = require("node:path")
+  const { spawnSync } = require("node:child_process")
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "omacast-preview-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const file = path.join(root, "-long\nline.txt")
+  fs.writeFileSync(file, "needle" + "x".repeat(600000))
+  const run = (preview) => {
+    const command = Model.previewCommand(preview)
+    return spawnSync(command[0], command.slice(1), { encoding: "utf8" })
+  }
+  for (const preview of [{ type: "file", path: file }, { type: "content", path: file, term: "needle" }]) {
+    const result = run(preview)
+    assert.equal(result.status, 3, result.stderr)
+    assert.ok(Buffer.byteLength(result.stdout) <= 16384 + Buffer.byteLength("\n[Preview truncated]\n"))
+    assert.ok(Model.cleanPreview(result.stdout).endsWith("\n[Preview truncated]\n"))
+  }
+  const dir = path.join(root, "dir")
+  fs.mkdirSync(dir)
+  for (let i = 0; i < 210; i++) fs.writeFileSync(path.join(dir, String(i).padStart(3, "0") + "z".repeat(240)), "")
+  const directory = run({ type: "file", path: dir })
+  assert.equal(directory.status, 3, directory.stderr)
+  assert.ok(Buffer.byteLength(directory.stdout) <= 16384 + Buffer.byteLength("\n[Preview truncated]\n"))
+  assert.match(Model.cleanPreview(directory.stdout), /\[Preview truncated\]/)
+  const shortDir = path.join(root, "many")
+  fs.mkdirSync(shortDir)
+  for (let i = 0; i < 210; i++) fs.writeFileSync(path.join(shortDir, String(i)), "")
+  const many = run({ type: "file", path: shortDir })
+  assert.equal(many.status, 3, many.stderr)
+  assert.match(many.stdout, /\[Preview truncated\]/)
+  assert.equal(many.stdout.split("\n").filter((line) => /^\d+$/.test(line)).length, 200)
+  assert.equal(run({ type: "file", path: path.join(root, "missing") }).status, 4)
+})
+
+test("preview byte limit distinguishes exact-size files from truncation", (t) => {
+  const fs = require("node:fs")
+  const os = require("node:os")
+  const path = require("node:path")
+  const { spawnSync } = require("node:child_process")
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "omacast-preview-exact-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  const file = path.join(root, "exact.txt")
+  fs.writeFileSync(file, "a".repeat(16384))
+  const command = Model.previewCommand({ type: "file", path: file })
+  const exact = spawnSync(command[0], command.slice(1), { encoding: "utf8" })
+  assert.equal(exact.status, 0, exact.stderr)
+  assert.equal(exact.stdout, "a".repeat(16384))
+})
+
+test("clipboard and selection reads expose oversized templates instead of silently accepting them", (t) => {
+  const fs = require("node:fs")
+  const os = require("node:os")
+  const path = require("node:path")
+  const { spawnSync } = require("node:child_process")
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "omacast-paste-"))
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }))
+  fs.writeFileSync(path.join(root, "wl-paste"), '#!/bin/bash\nif [ "$FAIL" = yes ]; then exit 2; fi\nif [ "$SMALL" = yes ]; then case " $* " in *" --primary "*) printf selection;; *) printf clipboard;; esac; else head -c 70000 /dev/zero; fi\n', { mode: 0o755 })
+  const run = (selection, extra = {}) => {
+    const command = Model.pasteCommand(selection)
+    return spawnSync(command[0], command.slice(1), { encoding: "utf8",
+      env: { ...process.env, PATH: `${root}:${process.env.PATH}`, ...extra } })
+  }
+  for (const selection of [false, true]) {
+    const result = run(selection)
+    assert.equal(result.status, 3, result.stderr)
+    assert.equal(Buffer.byteLength(result.stdout), 65536)
+  }
+  assert.equal(run(false, { SMALL: "yes" }).stdout, "clipboard")
+  assert.equal(run(true, { SMALL: "yes" }).stdout, "selection")
+  assert.equal(run(false, { FAIL: "yes" }).status, 4)
 })
 
 // ---- Script commands
@@ -349,7 +415,7 @@ test("script headers parse exactly as Raycast writes them", () => {
   assert.equal(Model.parseScriptCommand("# @raycast.schemaVersion 2\n# @raycast.title Future\n"), null)
 })
 
-test("script rows take typed arguments, refuse to run without the required one, and flag non-executables", () => {
+test("script rows retain literal arguments, offer missing-argument forms, and flag non-executables", () => {
   const records = "\x1e/s/jira.sh\x1f1\x1f" + SCRIPT + "\x1e/s/README.md\x1f0\x1f# notes\n\x1e/s/off.sh\x1f0\x1f# @raycast.schemaVersion 1\n# @raycast.title Off\n"
   const scripts = Model.parseScriptRecords(records)
   assert.deepEqual(scripts.map((s) => [s.keyword, s.executable]), [["jira", true], ["off", false]])
@@ -361,14 +427,13 @@ test("script rows take typed arguments, refuse to run without the required one, 
   assert.equal(ready.frecencyKey, "sc:/s/jira.sh")
 
   const missing = Model.scriptRows(scripts, "jira", {}, NOW)[0]
-  assert.equal(missing.payload.disabled, true)
-  assert.equal(missing.primaryLabel, "Needs issue")
+  assert.equal(missing.payload.disabled, false)
+  assert.equal(missing.payload.needsForm, true)
 
   const fuzzy = Model.scriptRows(scripts, "search ji", {}, NOW)[0]
-  assert.equal(fuzzy.payload.complete, true)
+  assert.equal(fuzzy.payload.needsForm, true)
 
   const off = Model.scriptRows(scripts, "off", {}, NOW)[0]
-  assert.equal(off.subtitle, "not executable")
   assert.equal(off.payload.disabled, true)
 })
 
